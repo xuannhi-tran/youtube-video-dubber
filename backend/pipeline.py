@@ -232,6 +232,18 @@ def normalize_translation(translated):
     return result
 
 
+# Chinese characters and CJK / full-width punctuation: the Vietnamese voice cannot read them.
+CJK = re.compile(r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]")
+
+
+class ChineseLeft(ValueError):
+    """The 'Vietnamese' still contains Chinese characters."""
+
+
+def strip_cjk(text):
+    return " ".join(CJK.sub(" ", text).split())
+
+
 def check_translation(translated, expected):
     if not isinstance(translated, list) or len(translated) != expected:
         count = len(translated) if isinstance(translated, list) else "no list"
@@ -239,6 +251,9 @@ def check_translation(translated, expected):
     for item in translated:
         if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"].strip():
             raise ValueError("a segment has no text")
+    for item in translated:
+        if CJK.search(item["text"]):
+            raise ChineseLeft(f"Chinese characters left in the translation: {CJK.search(item['text']).group(0)!r}")
 
 
 def context_lines(context):
@@ -319,7 +334,8 @@ Required format:
 def retry_note(problem, expected):
     """Told to the model after an unusable answer, so the next one is fixed."""
     return (
-        f"\n\nYour previous answer could not be used ({problem}). Answer again with ONLY "
+        f"\n\nYour previous answer could not be used ({problem}). Write every segment in Vietnamese "
+        "only: translate or transliterate Chinese words, never leave Chinese characters. Answer again with ONLY "
         f"a JSON array of exactly {expected} objects, one per input segment, each with "
         '"start", "end" and "text". No other text before or after the array.'
     )
@@ -346,6 +362,14 @@ def translate_chunk(chunk, model=None, context=(), generate=None):
         except ValueError as error:  # includes json.JSONDecodeError
             last_problem = error
             print(f"Bad answer from the model ({error}). Attempt {attempt}/{ANSWER_ATTEMPTS}")
+    if len(chunk) == 1 and isinstance(last_problem, ChineseLeft):
+        # One segment, still some Chinese after retries: drop those characters
+        # (the voice would skip or garble them) rather than stop the whole video.
+        print("Removing the Chinese characters the model left in this segment.")
+        item = normalize_translation(extract_json_list(answer))[0]
+        text = strip_cjk(item["text"])
+        if text:
+            return [{**item, "text": text}]
     if len(chunk) == 1:
         raise RuntimeError(f"The model never returned a usable translation: {last_problem}")
     middle = len(chunk) // 2
@@ -391,13 +415,21 @@ def find_cached(cache, chunk, current, reuse_other_models=True):
     model made of the same chunk (same glossary, same prompt version) is kept:
     switching from Groq to a local model must not throw away finished work.
     """
+    def usable(translated):
+        # A saved translation with Chinese left in it is translated again.
+        try:
+            check_translation(translated, len(chunk))
+        except ValueError:
+            return False
+        return True
+
     key = chunk_key(chunk, current)
-    if key in cache:
+    if key in cache and usable(cache[key]):
         return cache[key], current
     if reuse_other_models:
         for name in earlier_models(cache, current):
             other = chunk_key(chunk, name)
-            if other in cache:
+            if other in cache and usable(cache[other]):
                 return cache[other], name
     return None, None
 
@@ -432,6 +464,14 @@ def run_local_checks():
         pass
     else:
         raise AssertionError("an answer without JSON must be rejected")
+    try:
+        check_translation([{"text": "đừng quá用力"}], 1)
+    except ChineseLeft:
+        pass
+    else:
+        raise AssertionError("Chinese characters in the translation must be rejected")
+    check_translation([{"text": "Huang Xiaoming và Wu Tianle, 100%"}], 1)
+    assert strip_cjk("đừng quá用力 nhé。") == "đừng quá nhé"
     assert normalize_translation(["a", {"translation": "b"}]) == [{"text": "a"}, {"translation": "b", "text": "b"}]
 
     chunk = [{"start": float(i), "end": i + 1.0, "source_text": f"句{i}"} for i in range(3)]
@@ -453,16 +493,27 @@ def run_local_checks():
     result = translate_chunk(chunk, generate=by_size)
     assert [item["text"] for item in result] == ["t1", "t2", "t2"]
 
+    # Chinese left in an answer is asked again; if it never goes away in a single segment, it is removed.
+    one = chunk[:1]
+    replies = iter([answer(["quá用力"]), answer(["quá nhiều"])])
+    assert translate_chunk(one, generate=lambda prompt: next(replies))[0]["text"] == "quá nhiều"
+    assert translate_chunk(one, generate=lambda prompt: answer(["quá用力"]))[0]["text"] == "quá"
+
     current, old = "ollama:qwen3:8b", f"groq:{llm.DEFAULT_MODELS['groq']}"
-    cache = {chunk_key(chunk, old): ["from groq"]}
-    assert find_cached(cache, chunk, current) == (["from groq"], old)
+    groq_text = [{"text": f"từ groq {i}"} for i in range(3)]
+    qwen_text = [{"text": f"từ qwen {i}"} for i in range(3)]
+    cache = {chunk_key(chunk, old): groq_text}
+    assert find_cached(cache, chunk, current) == (groq_text, old)
     assert find_cached(cache, chunk, current, reuse_other_models=False) == (None, None)
-    cache[chunk_key(chunk, current)] = ["from qwen"]
-    assert find_cached(cache, chunk, current) == (["from qwen"], current)
+    cache[chunk_key(chunk, current)] = qwen_text
+    assert find_cached(cache, chunk, current) == (qwen_text, current)
+    cache[chunk_key(chunk, current)] = [{"text": "quá用力"}] * 3
+    assert find_cached(cache, chunk, current) == (groq_text, old)  # the one with Chinese is skipped
     remember_model(cache, current)
     remember_model(cache, current)
     assert cache[MODELS_ENTRY] == [current]
-    assert find_cached({chunk_key(chunk, "x:y"): ["z"], MODELS_ENTRY: ["x:y"]}, chunk, current) == (["z"], "x:y")
+    other = [{"text": "z"}] * 3
+    assert find_cached({chunk_key(chunk, "x:y"): other, MODELS_ENTRY: ["x:y"]}, chunk, current) == (other, "x:y")
 
 
 def parse_args():
