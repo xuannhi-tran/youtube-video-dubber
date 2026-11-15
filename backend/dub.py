@@ -4,6 +4,7 @@
     python dub.py URL --max-seconds 120    # try only the first 2 minutes
     python dub.py URL --redo speech        # redo this stage and everything after it
     python dub.py URL --glossary-only      # prepare the job folder, then stop
+    python dub.py URL --original-volume 0.04   # mix the original voice lower (0 = drop it); redoes only the last stage
 
 Each video gets its own folder, dub_jobs_output/<video id>/, and the result is
 dub_jobs_output/<video id>/dub_output/dubbed.mp4. Finished stages are skipped on
@@ -130,6 +131,8 @@ def run_local_checks():
     assert reconcile_state({"done": old_running, "max_seconds": None}, None)["done"] == ["download", "transcribe"]
     assert reconcile_state({"done": ["download", "assemble"], "max_seconds": None}, None)["done"] == ["download"]
 
+    assert mux_volume_args(argparse.Namespace(original_volume=None)) == []
+    assert mux_volume_args(argparse.Namespace(original_volume=0.04)) == ["--original-volume", 0.04]
     assert missing_modules(lambda module: module != "vieneu") == ["vieneu"]
     assert missing_modules(lambda module: True) == []
 
@@ -300,13 +303,20 @@ def transcribe_args(job, args):
     return result
 
 
+def mux_volume_args(args):
+    """--original-volume for mux_dub.py; without the option its own default applies."""
+    if args.original_volume is None:
+        return []
+    return ["--original-volume", args.original_volume]
+
+
 def stage_actions(url, job, args):
     return {
         "download": lambda: download(url, job, args.max_height),
         "transcribe": lambda: run_script(job, "pipeline.py", *transcribe_args(job, args)),
         "speech": lambda: run_script(job, "speech.py", *(["--fresh"] if args.redo == "speech" else [])),
         "assemble": lambda: run_script(job, "assemble_dub.py"),
-        "mux": lambda: run_script(job, "mux_dub.py", "--video", job / "source.mp4"),
+        "mux": lambda: run_script(job, "mux_dub.py", "--video", job / "source.mp4", *mux_volume_args(args)),
     }
 
 
@@ -323,6 +333,9 @@ def parse_args():
                         help="largest video height to download (default 720)")
     parser.add_argument("--redo", choices=STAGE_NAMES,
                         help="run this stage again, and every stage after it")
+    parser.add_argument("--original-volume", type=float, default=None,
+                        help="volume of the original audio under the dub, 0 to 1 (default: mux_dub.py's 0.12, "
+                             "0 drops it); changing it on a finished job only redoes the mux stage")
     parser.add_argument("--glossary-only", action="store_true",
                         help="create the job folder and glossary.json, then stop")
     args = parser.parse_args()
@@ -330,6 +343,8 @@ def parse_args():
         parser.error("--max-seconds must be positive")
     if args.max_height <= 0:
         parser.error("--max-height must be positive")
+    if args.original_volume is not None and not 0 <= args.original_volume <= 1:
+        parser.error("--original-volume must be between 0 and 1")
     return args
 
 
@@ -353,6 +368,8 @@ def main():
     state = load_state(job, args.max_seconds)
     if args.redo:
         state["done"] = forget_from(state["done"], args.redo)
+    elif args.original_volume is not None:
+        state["done"] = forget_from(state["done"], "mux")  # only the last stage depends on it
     save_state(job, state)
 
     def finish(name):
