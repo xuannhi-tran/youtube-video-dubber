@@ -127,6 +127,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `LLM_MODEL` | Model name; each provider has a default (`openai/gpt-oss-120b` for Groq, `gemini-3.5-flash-lite` for Gemini, `qwen3:8b` for Ollama). |
 | `TRANSLATE_LLM_PROVIDER`, `TRANSLATE_LLM_MODEL` | Override the two above for translation only. |
 | `FIT_LLM_PROVIDER`, `FIT_LLM_MODEL` | Override them for shortening only (`fit_blocks.py` and `speech.py`). |
+| `FIT_FALLBACK_PROVIDER`, `FIT_FALLBACK_MODEL` | Shortening only: if the main LLM runs out of its daily quota, this one takes over for the rest of the run (e.g. `ollama` / `qwen3:8b`). Lines already shortened are kept. The next run tries the main LLM first again. Not available for translation. |
 | `LLM_MAX_TOKENS` | Cap on the answer length (some Groq models allow very little per minute). |
 | `GROQ_API_URL` | Any OpenAI-compatible chat endpoint instead of Groq's. |
 | `GEMINI_RPM` | Requests per minute this process may send to Gemini (default 10, the free Flash Lite limit is 15). |
@@ -147,7 +148,7 @@ FIT_LLM_PROVIDER=groq
 FIT_LLM_MODEL=openai/gpt-oss-120b
 ```
 
-with a local Ollama model as the fallback: if a stage stops on a daily limit, run again with `TRANSLATE_LLM_PROVIDER=ollama` (or `FIT_LLM_PROVIDER=ollama`); windows already translated by another model are kept. Gemini limits differ a lot between models and accounts (a lite model usually allows far more requests per minute and per day than a full one); check yours in AI Studio and pick the model accordingly. A per-minute limit is waited out automatically; a per-day limit stops the run with a message, keeping everything finished (the free tier resets at midnight Pacific time). Requests are spaced to `GEMINI_RPM`; translation and speech run as separate processes, so keep that in mind if both use Gemini.
+with a local Ollama model as the fallback: for shortening, set `FIT_FALLBACK_PROVIDER=ollama` and `FIT_FALLBACK_MODEL=qwen3:8b` and it switches by itself when the main model hits its daily limit (Ollama must be running; `dub.py` warns at the start if it is not). Otherwise, if a stage stops on a daily limit, run again with `TRANSLATE_LLM_PROVIDER=ollama` (or `FIT_LLM_PROVIDER=ollama`); windows already translated by another model are kept. Gemini limits differ a lot between models and accounts (a lite model usually allows far more requests per minute and per day than a full one); check yours in AI Studio and pick the model accordingly. A per-minute limit is waited out automatically; a per-day limit stops the run with a message, keeping everything finished (the free tier resets at midnight Pacific time). Requests are spaced to `GEMINI_RPM`; translation and speech run as separate processes, so keep that in mind if both use Gemini.
 
 ### Glossary
 
