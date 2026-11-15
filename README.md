@@ -103,6 +103,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `GROQ_API_URL` | Any OpenAI-compatible chat endpoint instead of Groq's. |
 | `GEMINI_RPM` | Requests per minute this process may send to Gemini (default 10, the free Flash Lite limit is 15). |
 | `LOCAL_LLM_URL`, `LOCAL_LLM_TIMEOUT`, `LOCAL_LLM_THINK` | Local server settings, see below. |
+| `TTS_VOICE` | VieNeu preset voice, default `xuan_vinh` (e.g. `thien_minh`). `python compare_voices.py` lets you listen to every voice. Changing it reads all blocks again (clips are keyed by voice); the speech rate is calibrated per voice. |
 
 `python llm.py` checks the logic and makes one real call for translation and one for shortening, which is the quickest way to test your settings. `python llm.py --list` lists the models your Groq key can use, `python llm.py --list gemini` the ones your Gemini key can use (copy the name exactly). `backend/.env.example` has every setting with a short comment.
 
@@ -207,7 +208,7 @@ python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5
 
 ## Limitations
 
-- Chinese → Vietnamese only, one voice (`xuan_vinh`).
+- Chinese → Vietnamese only, one VieNeu voice per run (`xuan_vinh` by default, see `TTS_VOICE`).
 - The original audio is only turned down, not removed: voices are not separated from music. Use `--original-volume` to taste (0 drops it).
 - VieNeu on CPU is slow, so a long video takes a long time to read. GPU speech is not implemented.
 - Whisper needs a CUDA GPU. Without one, change `device` in `pipeline.py` (slower).
