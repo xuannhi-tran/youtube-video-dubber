@@ -35,6 +35,7 @@ OUTPUT_DIR = BASE_DIR / "dub_output"
 BLOCKS_DIR = OUTPUT_DIR / "blocks"
 TRACK_FILE = OUTPUT_DIR / "dub_track.wav"
 PREVIEW_FILE = OUTPUT_DIR / "preview_mix.wav"
+TIMELINE_FILE = OUTPUT_DIR / "dub_timeline.json"
 EXPECTED_FORMAT = (1, 2, 48000)  # channels, sample width in bytes, sample rate
 TRIM_PADDING = 0.040
 
@@ -284,13 +285,20 @@ def render_blocks(measured, plan):
 
 def assemble(measured, plan):
     rate = EXPECTED_FORMAT[2]
-    pieces, cursor = [], 0
+    pieces, cursor, timeline = [], 0, []
     for item, step in zip(measured, plan):
         start = max(round(step["start"] * rate), cursor)  # never overlap the previous clip
         pieces += [np.zeros(start - cursor, dtype="<i2"), item["samples"]]
         cursor = start + len(item["samples"])
+        timeline.append({
+            "block_id": item["block"]["block_id"],
+            "start": round(start / rate, 3), "end": round(cursor / rate, 3),
+            "text": item["block"].get("translated_text", ""),
+        })
     OUTPUT_DIR.mkdir(exist_ok=True)
     write_samples(TRACK_FILE, np.concatenate(pieces))
+    # Where each spoken line really landed; subtitles are timed from this.
+    TIMELINE_FILE.write_text(json.dumps(timeline, ensure_ascii=False, indent=1), encoding="utf-8")
     return cursor / rate
 
 
