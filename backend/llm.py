@@ -17,6 +17,11 @@ different LLMs; these override LLM_PROVIDER / LLM_MODEL for that job only:
     TRANSLATE_LLM_PROVIDER=...   TRANSLATE_LLM_MODEL=...
     FIT_LLM_PROVIDER=...         FIT_LLM_MODEL=...   (also used by speech.py)
 
+Shortening can also fall back to another LLM when its main one runs out of its
+daily limit (the rest of that run, and later runs, try the main LLM first again):
+
+    FIT_FALLBACK_PROVIDER=ollama   FIT_FALLBACK_MODEL=qwen3:8b
+
 Local servers:
 
     LOCAL_LLM_URL=...        # default http://localhost:11434/v1 (ollama) or :1234/v1 (lmstudio)
@@ -31,6 +36,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 
 import httpx
@@ -156,6 +162,19 @@ def settings(provider=None, model=None, role=None):
     if not key:
         raise RuntimeError(f"{KEY_NAMES[provider]} is missing from .env")
     return provider, model, key
+
+
+def fallback_settings(role):
+    """(provider, model, api_key) of the role's fallback LLM, or None when none is set.
+
+    Only the "fit" role has one: FIT_FALLBACK_PROVIDER (+ FIT_FALLBACK_MODEL).
+    """
+    if role != "fit":
+        return None
+    provider = (os.getenv("FIT_FALLBACK_PROVIDER") or "").strip().lower()
+    if not provider:
+        return None
+    return settings(provider, os.getenv("FIT_FALLBACK_MODEL") or None)
 
 
 def describe(provider=None, model=None, role=None):
@@ -432,13 +451,19 @@ def _local(prompt, provider, model, api_key, post, sleep):
     raise LLMError(f"{name} gave no answer")  # unreachable
 
 
-def check_local_server(role=None, get=httpx.get):
+def check_local_server(role=None, get=httpx.get, fallback=False):
     """None when `role`'s LLM is not local or the server has the model; else a problem to show.
 
     Used before a long run so a stopped Ollama or a missing `ollama pull` shows up now,
-    not after Whisper has finished.
+    not after Whisper has finished. `fallback=True` checks the role's fallback LLM instead.
     """
-    provider, model, _ = settings(role=role)
+    if fallback:
+        chosen = fallback_settings(role)
+        if chosen is None:
+            return None
+        provider, model, _ = chosen
+    else:
+        provider, model, _ = settings(role=role)
     if not is_local(provider):
         return None
     name = "Ollama" if provider == "ollama" else "LM Studio"
@@ -469,12 +494,36 @@ def list_models(provider="groq", get=httpx.get):
 list_groq_models = list_models  # the old name
 
 
+_switched = set()  # roles that moved to their fallback LLM in this process
+_switch_lock = threading.Lock()
+
+
 def generate(prompt, model=None, provider=None, role=None, post=httpx.post, sleep=time.sleep):
     """Send one prompt and return the answer text (reasoning blocks removed).
 
     `role` ("translate" or "fit") picks that job's settings, see settings().
+    When the role's main LLM is out of quota and it has a fallback (FIT_FALLBACK_*),
+    this and every later call of the process use the fallback.
     """
-    chosen_provider, chosen_model, api_key = settings(provider, model, role)
+    explicit = provider is not None or model is not None
+    fallback = None if explicit else fallback_settings(role)
+    if fallback and role in _switched:
+        return _generate_with(prompt, fallback, post, sleep)
+    try:
+        return _generate_with(prompt, settings(provider, model, role), post, sleep)
+    except QuotaExhausted as error:
+        if not fallback:
+            raise
+        with _switch_lock:
+            if role not in _switched:
+                _switched.add(role)
+                print(f"{describe(role=role)} is out of quota ({str(error)[:120]}). "
+                      f"Switching to {fallback[0]}:{fallback[1]} for the rest of this run.", flush=True)
+        return _generate_with(prompt, fallback, post, sleep)
+
+
+def _generate_with(prompt, chosen, post, sleep):
+    chosen_provider, chosen_model, api_key = chosen
     if chosen_provider == "groq":
         text = _groq(prompt, chosen_model, api_key, post, sleep)
     elif is_local(chosen_provider):
@@ -513,6 +562,35 @@ def _scripted_post(*responses):
         return item
     post.calls = post_calls
     return post
+
+
+def _check_fallback(wait):
+    """Quota on the main LLM moves the "fit" role to FIT_FALLBACK_*, once, and keeps it there."""
+    day = _FakeResponse(429, error="Rate limit ... on tokens per day (TPD): Limit 200000. Please try again in 6m")
+    os.environ["FIT_LLM_PROVIDER"], os.environ["FIT_LLM_MODEL"] = "groq", "big"
+    # No fallback set: the quota error still reaches the caller.
+    assert fallback_settings("fit") is None and fallback_settings("translate") is None
+    try:
+        generate("hi", role="fit", post=_scripted_post(day), sleep=wait)
+    except QuotaExhausted:
+        pass
+    else:
+        raise AssertionError("without a fallback the quota error must surface")
+    assert not _switched
+
+    os.environ["FIT_FALLBACK_PROVIDER"], os.environ["FIT_FALLBACK_MODEL"] = "ollama", "qwen3:8b"
+    assert fallback_settings("fit")[:2] == ("ollama", "qwen3:8b") and fallback_settings("translate") is None
+    post = _scripted_post(day, _FakeResponse(200, "from fallback"))
+    assert generate("hi", role="fit", post=post, sleep=wait) == "from fallback"
+    assert "11434" in post.url and post.calls[1]["json"]["model"] == "qwen3:8b" and "fit" in _switched
+    post = _scripted_post(_FakeResponse(200, "again"))
+    assert generate("hi", role="fit", post=post, sleep=wait) == "again" and len(post.calls) == 1
+    assert "11434" in post.url  # later calls go straight to the fallback
+    # Other roles and explicit arguments are not affected.
+    assert generate("hi", role="translate", post=_scripted_post(_FakeResponse(200, "t")), sleep=wait) == "t"
+    _switched.clear()
+    os.environ.pop("FIT_FALLBACK_PROVIDER"); os.environ.pop("FIT_FALLBACK_MODEL")
+    os.environ.pop("FIT_LLM_PROVIDER"); os.environ.pop("FIT_LLM_MODEL")
 
 
 def _check_roles_and_local():
@@ -721,7 +799,7 @@ def run_local_checks():
 
     names = ("GROQ_API_KEY", "LLM_PROVIDER", "LLM_MODEL", "LLM_MAX_TOKENS",
              "TRANSLATE_LLM_PROVIDER", "TRANSLATE_LLM_MODEL", "FIT_LLM_PROVIDER", "FIT_LLM_MODEL",
-             "LOCAL_LLM_URL", "LOCAL_LLM_TIMEOUT", "LOCAL_LLM_THINK", "LOCAL_LLM_API_KEY",
+             "FIT_FALLBACK_PROVIDER", "FIT_FALLBACK_MODEL", "LOCAL_LLM_URL", "LOCAL_LLM_TIMEOUT", "LOCAL_LLM_THINK", "LOCAL_LLM_API_KEY",
              "GEMINI_API_KEY", "GEMINI_RPM")
     saved = {name: os.environ.get(name) for name in names}
     for name in names:
@@ -782,6 +860,8 @@ def run_local_checks():
         else:
             raise AssertionError("a non-numeric LLM_MAX_TOKENS must be rejected")
         os.environ.pop("LLM_MAX_TOKENS")
+
+        _check_fallback(wait)
 
         try:
             generate("hi", post=_scripted_post(_FakeResponse(400, error="bad model")), sleep=wait)

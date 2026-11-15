@@ -190,6 +190,17 @@ def preflight():
         problem = llm.check_local_server(role)
         if problem:
             problems.append(problem)
+    try:
+        fallback = llm.fallback_settings("fit")
+    except (RuntimeError, ValueError) as error:
+        problems.append(f"{error} (FIT_FALLBACK_*, backend/.env)")
+        fallback = None
+    if fallback:
+        problem = llm.check_local_server("fit", fallback=True)
+        if problem:  # only a warning: the main LLM may not run out
+            print(f"Warning: the shortening fallback is not ready. {problem}")
+        else:
+            print(f"Shortening falls back to {fallback[0]}:{fallback[1]} if the main LLM runs out of quota.")
     if problems:
         raise SystemExit("Cannot start:\n- " + "\n- ".join(problems))
 
