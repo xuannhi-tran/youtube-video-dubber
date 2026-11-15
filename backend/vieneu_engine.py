@@ -7,16 +7,25 @@ The output is a mono 16-bit PCM WAV at the engine's sample rate (48 kHz for
 VieNeu v3 Turbo), which is what assemble_dub.py expects.
 """
 
+import os
 from pathlib import Path
 import re
 import unicodedata
 import wave
 
-import hf_cache_fix  # keep before vieneu: it must set its env var before huggingface_hub loads
+from dotenv import load_dotenv
 
+import hf_cache_fix  # keep before vieneu: it must set its env var before huggingface_hub loads
+from workdir import SCRIPT_DIR
+
+
+load_dotenv(SCRIPT_DIR / ".env")
 
 MODEL = "vieneu-v3-turbo"
-VOICE = "xuan_vinh"  # slug of the preset voice name, see slugify()
+# Slug of the preset voice name (see slugify()). TTS_VOICE in .env overrides it, e.g. TTS_VOICE=thien_minh;
+# `python compare_voices.py` lists the voices and lets you listen to them. Clips are stored with the voice
+# they were read with, so changing it reads every block again.
+VOICE = os.getenv("TTS_VOICE", "").strip() or "xuan_vinh"
 
 
 def slugify(name):
