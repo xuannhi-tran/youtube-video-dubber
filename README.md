@@ -2,11 +2,9 @@
 
 A personal prototype that dubs a Chinese video into Vietnamese. I built it because I wanted to watch Chinese knowledge videos without reading subtitles the whole time.
 
-It's an offline pipeline, not real-time. You give it a video, wait a few minutes, and get back an MP4 with a Vietnamese voice track.
+It's an offline pipeline, not real-time (the repo name says "live", but it isn't). You give it a video, wait a few minutes, and get back an MP4 with a Vietnamese voice track.
 
 **Status:** works end to end on a 72-second demo clip. It has not been tested on long videos or other languages.
-
-
 
 ## How it works
 
@@ -80,6 +78,64 @@ python mux_dub.py --video xiaowulang_original.mp4
 
 The output goes to `backend/dub_output/`: the dub track, a preview mix, and `dubbed.mp4`.
 
+## Using a local LLM (Ollama) instead of Groq
+
+Groq's free tier has a daily token limit. Translation (`pipeline.py`) and shortening (`fit_blocks.py`, and the LLM worker in `speech.py`) can instead use a model on your own computer through Ollama or LM Studio. Local models have no quota and no key. Nothing changes unless you set the variables below: the default is still Groq.
+
+**1. Install Ollama and pull a model** (Windows: download the installer from https://ollama.com/download, then in a terminal):
+
+```
+ollama pull qwen3:8b             # recommended, about 5 GB
+ollama pull qwen2.5:7b-instruct  # alternative, a bit faster, less careful with long context
+ollama list                      # check it is there
+```
+
+Both are Q4 builds that fit an 8 GB GPU. Whisper large-v3 also uses the GPU, but only at the start, and Ollama unloads its model after a few idle minutes, so the stages mostly take turns. If you run out of VRAM, set `OLLAMA_KEEP_ALIVE=0` or pick a smaller model such as `qwen3:4b`.
+
+**2. Choose it in `backend/.env`** (keep your keys, add the lines you need):
+
+```
+# everything local
+LLM_PROVIDER=ollama
+LLM_MODEL=qwen3:8b
+
+# or mix: translate with Groq, shorten locally (shortening is many short calls)
+FIT_LLM_PROVIDER=ollama
+FIT_LLM_MODEL=qwen3:8b
+
+# or the other way round
+TRANSLATE_LLM_PROVIDER=ollama
+TRANSLATE_LLM_MODEL=qwen2.5:7b-instruct
+```
+
+`TRANSLATE_LLM_*` only affects translation, `FIT_LLM_*` only shortening, and `LLM_*` is the fallback for both. Setting a provider without a model uses that provider's default (`qwen3:8b` for Ollama).
+
+| Variable | Meaning |
+| --- | --- |
+| `LLM_PROVIDER` | `groq`, `gemini`, `ollama` or `lmstudio` |
+| `LOCAL_LLM_URL` | default `http://localhost:11434/v1` (Ollama) or `http://localhost:1234/v1` (LM Studio) |
+| `LOCAL_LLM_TIMEOUT` | seconds to wait for one answer (default 600) |
+| `LOCAL_LLM_THINK` | `1` lets Qwen3 reason before answering; off by default because it is slow |
+
+LM Studio: load a model, start the server in the Developer tab, set `LLM_PROVIDER=lmstudio` and `LLM_MODEL` to the model identifier shown there.
+
+**3. Run it**
+
+```
+python llm.py                                   # checks the logic and makes one real call per job
+python dub.py "https://www.youtube.com/watch?v=..."
+python dub.py URL --redo transcribe             # translate everything again with the current model
+python compare_translators.py 2ZA7QtaFo4Q --provider ollama --models qwen3:8b,qwen2.5:7b-instruct
+```
+
+`dub.py` checks before starting that Ollama is running and that the model has been pulled.
+
+**What to expect from 7-8B models**
+
+- Their JSON is less reliable. The parser accepts code fences, `<think>` blocks, chatter around the array, trailing commas and an answer cut off before `]`. A bad answer is asked again with a note on what was wrong, and a chunk that still fails is split in two halves. If it still fails, the run stops and the finished chunks are kept.
+- Translation quality is lower than gpt-oss-120b, especially for names and terms. Put them in the job's `glossary.json`.
+- Chunks already translated by another model are kept when you switch (same transcript, glossary and prompt version). Add `--retranslate` to `pipeline.py` to translate them again.
+
 ## Limitations
 
 - One demo clip, hardcoded filenames, first 90 seconds only.
@@ -87,8 +143,6 @@ The output goes to `backend/dub_output/`: the dub track, a preview mix, and `dub
 - The word budget depends on the voice and the speaking rate I measured, so it needs recalibrating for another voice.
 - Pronunciation and tone of the TTS voice are as good as Gemini's, and I haven't tuned them.
 - Some wording differs between blocks (for example, "Kitô giáo" vs "Cơ Đốc giáo"). The glossary fixes this for new translations but I haven't regenerated the old ones.
-
-Demo link: https://drive.google.com/file/d/1Hvb74YnhNME6vJmsRZfdhoMJ9yfgouP9/view?usp=drive_link
 
 ## Notes on content
 

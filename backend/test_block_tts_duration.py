@@ -1,22 +1,17 @@
-"""Benchmark dubbing blocks. Running this script consumes Gemini TTS quota."""
+"""Benchmark dubbing blocks with local VieNeu TTS (no API quota)."""
 
 import json
 import math
-import os
 from pathlib import Path
-import re
 import sys
-from types import SimpleNamespace
 import wave
 
-from dotenv import load_dotenv
-from google import genai
-from google.genai import errors
-
+from vieneu_engine import Narrator
 import test_tts_duration as tts
+from workdir import WORKDIR
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = WORKDIR
 INPUT_FILE = BASE_DIR / "dub_blocks.json"
 OUTPUT_DIR = BASE_DIR / "block_tts_output"
 RESULTS_FILE = BASE_DIR / "block_tts_duration_results.json"
@@ -26,52 +21,6 @@ RESULTS_FILE = BASE_DIR / "block_tts_duration_results.json"
 if len(sys.argv) > 1:
     INPUT_FILE = Path(sys.argv[1]).resolve()
     RESULTS_FILE = BASE_DIR / "block_tts_duration_results_fitted.json"
-
-
-class DailyQuotaExhausted(Exception):
-    """Stop without entering the shared temporary-429 retry loop."""
-
-
-def is_daily_quota(error):
-    if error.code != 429:
-        return False
-    # google-genai 2.25.0 exposes the decoded error body as .details.
-    body = error.details
-    if isinstance(body, dict):
-        body = body.get("error", body)
-    details = body.get("details", []) if isinstance(body, dict) else []
-    for detail in details if isinstance(details, list) else []:
-        if not isinstance(detail, dict):
-            continue
-        if detail.get("@type") != "type.googleapis.com/google.rpc.QuotaFailure":
-            continue
-        violations = detail.get("violations", [])
-        for violation in violations if isinstance(violations, list) else []:
-            if not isinstance(violation, dict):
-                continue
-            identifiers = " ".join(str(violation.get(key, "")) for key in (
-                "quotaId", "quotaMetric", "quota_id", "quota_metric", "description"
-            ))
-            normalized = re.sub(r"[^a-z]", "", identifiers.lower())
-            if "perday" in normalized or "daily" in normalized:
-                return True
-    return False
-
-
-def generate_clip(client, text, audio_file):
-    # Intercept daily quotas before the existing helper retries ClientError.
-    # All request configuration, WAV validation, atomic writes and other retries
-    # remain in the existing helper, without changing its globals or source.
-    def generate_content(**kwargs):
-        try:
-            return client.models.generate_content(**kwargs)
-        except errors.ClientError as error:
-            if is_daily_quota(error):
-                raise DailyQuotaExhausted() from error
-            raise
-
-    guarded_client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
-    return tts.generate_clip(guarded_client, text, audio_file)
 
 
 def load_blocks():
@@ -171,12 +120,8 @@ def main():
         print_summary(results)
         return
 
-    load_dotenv(BASE_DIR / ".env")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is missing from .env")
     print(f"Model: {tts.MODEL} | Voice: {tts.VOICE} | Blocks: {len(blocks)}")
-    with genai.Client(api_key=api_key) as client:
+    with Narrator() as narrator:
         for block in blocks:
             block_id = block["block_id"]
             audio_file = OUTPUT_DIR / f"block_{block_id:03d}.wav"
@@ -187,10 +132,7 @@ def main():
                 metadata.pop(audio_file.name, None)
                 tts.write_json_atomic(metadata_file, metadata)
                 try:
-                    duration = generate_clip(client, block["translated_text"], audio_file)
-                except DailyQuotaExhausted:
-                    print("Daily Gemini TTS quota exhausted. Stopping benchmark.", flush=True)
-                    return
+                    duration = tts.generate_clip(narrator, block["translated_text"], audio_file)
                 except Exception:
                     print(f"Block {block_id:03d} failed; completed checkpoints are preserved.")
                     raise

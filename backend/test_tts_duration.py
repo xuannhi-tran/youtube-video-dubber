@@ -1,26 +1,18 @@
-"""Benchmark translated segments with Gemini TTS (running consumes API quota)."""
+"""Benchmark translated segments with local VieNeu TTS (no API quota)."""
 
 import hashlib
-import io
 import json
 import math
-import os
 from pathlib import Path
-import random
-import time
 import wave
 
-from dotenv import load_dotenv
-from google import genai
-from google.genai import errors, types
+from vieneu_engine import MODEL, VOICE, Narrator
 
 
 BASE_DIR = Path(__file__).resolve().parent
 INPUT_FILE = BASE_DIR / "translated_segments.json"
 OUTPUT_DIR = BASE_DIR / "tts_output"
 RESULTS_FILE = BASE_DIR / "tts_duration_results.json"
-MODEL = "gemini-3.8-flash-tts"
-VOICE = "Charon"
 
 
 def content_fingerprint(text):
@@ -28,8 +20,6 @@ def content_fingerprint(text):
         "translated_text": text,
         "model": MODEL,
         "voice": VOICE,
-        "language_code": "vi",
-        "response_modalities": ["AUDIO"],
     }
     encoded = json.dumps(content, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -65,28 +55,6 @@ def classify(ratio):
     return "TOO_LONG"
 
 
-def retry_delay(error):
-    # SDK 2.25.0 stores the decoded response body in APIError.details.
-    body = error.details
-    if isinstance(body, dict):
-        body = body.get("error", body)
-    details = body.get("details", []) if isinstance(body, dict) else []
-    for detail in details if isinstance(details, list) else []:
-        if not isinstance(detail, dict):
-            continue
-        if detail.get("@type") != "type.googleapis.com/google.rpc.RetryInfo":
-            continue
-        value = detail.get("retryDelay")
-        if isinstance(value, str) and value.endswith("s"):
-            try:
-                seconds = float(value[:-1])
-            except ValueError:
-                continue
-            if math.isfinite(seconds) and seconds >= 0:
-                return max(1.0, seconds) + random.uniform(0, 1)
-    return 21.0 + random.uniform(0, 1)
-
-
 def measure_wav(source):
     with wave.open(source, "rb") as wav_file:
         frame_count = wav_file.getnframes()
@@ -100,56 +68,9 @@ def measure_wav(source):
         return frame_count / sample_rate
 
 
-def generate_clip(client, text, audio_file):
-    max_attempts = 5
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=text,
-                config=types.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                    speech_config=types.SpeechConfig(
-                        language_code="vi",
-                        voice_config=types.VoiceConfig(voice=VOICE),
-                    ),
-                ),
-            )
-            break
-        except errors.ClientError as error:
-            if error.code != 429 or attempt == max_attempts:
-                raise
-            delay = retry_delay(error)
-            print(
-                f"Gemini rate limit (429). Retry {attempt + 1}/{max_attempts} "
-                f"in {delay:.1f}s...",
-                flush=True,
-            )
-            time.sleep(delay)
-
-    candidates = response.candidates or []
-    if not candidates or not candidates[0].content:
-        raise ValueError("Gemini returned no audio candidate")
-    candidate = candidates[0]
-    if candidate.finish_reason != types.FinishReason.STOP:
-        raise ValueError(f"Incomplete TTS response: {candidate.finish_reason}")
-    audio_parts = [
-        part.inline_data
-        for part in candidate.content.parts or []
-        if part.inline_data is not None
-    ]
-    if len(audio_parts) != 1 or not audio_parts[0].data:
-        raise ValueError("Expected one non-empty WAV audio part")
-    data = audio_parts[0].data
-
-    # Gemini 3.8 unary TTS returns a complete PCM WAV, including its header.
-    # Read the header and frames rather than assuming a sample rate or duration.
-    duration = measure_wav(io.BytesIO(data))
-
-    temporary_file = audio_file.with_suffix(".wav.tmp")
-    temporary_file.write_bytes(data)
-    temporary_file.replace(audio_file)
-    return duration
+def generate_clip(narrator, text, audio_file):
+    """Synthesize `text` into `audio_file` with the local VieNeu voice; return seconds."""
+    return narrator.synthesize(text, audio_file)
 
 
 def main():
@@ -166,10 +87,6 @@ def main():
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"Segment {index:03d}: empty translated_text")
 
-    load_dotenv(BASE_DIR / ".env")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is missing from .env")
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     results = []
@@ -205,7 +122,7 @@ def main():
         checkpoint[index] = make_result(segment, audio_file, duration, fingerprint)
     write_json_atomic(RESULTS_FILE, [checkpoint[key] for key in sorted(checkpoint)])
     print(f"Model: {MODEL} | Voice: {VOICE} | Segments: {len(segments)}")
-    with genai.Client(api_key=api_key) as client:
+    with Narrator() as narrator:
         for index, segment in enumerate(segments, start=1):
             start, end = segment["start"], segment["end"]
             slot_duration = end - start
@@ -221,7 +138,7 @@ def main():
                     metadata.pop(audio_file.name, None)
                     write_json_atomic(metadata_file, metadata)
                     tts_duration = generate_clip(
-                        client, segment["translated_text"], audio_file
+                        narrator, segment["translated_text"], audio_file
                     )
                     metadata[audio_file.name] = {"fingerprint": fingerprints[index]}
                     write_json_atomic(metadata_file, metadata)

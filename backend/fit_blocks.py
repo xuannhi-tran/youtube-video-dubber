@@ -1,29 +1,35 @@
 """Fit Vietnamese dub blocks to their time slots by word budget.
 
 Default is a DRY RUN with no API calls. Pass --apply to rewrite over-budget
-blocks with Gemini (text only). dub_blocks.json is never modified.
+blocks with the LLM from llm.py (text only; FIT_LLM_PROVIDER / FIT_LLM_MODEL pick it). dub_blocks.json is never modified.
 """
 
 import argparse
 import json
 import math
 from pathlib import Path
-import random
 import re
 import statistics
-import time
+
+import llm
+from workdir import WORKDIR
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = WORKDIR
 INPUT_FILE = BASE_DIR / "dub_blocks.json"
 RESULTS_FILE = BASE_DIR / "block_tts_duration_results.json"
 OUTPUT_FILE = BASE_DIR / "dub_blocks_fitted.json"
-MODEL = "gemini-3.6-flash"
 DEFAULT_WORDS_PER_SECOND = 4.0
-# Budget slightly above 1.0x; audio may later be sped up by at most ~1.2x.
-TARGET = 1.1
+# How much longer than its slot a block may be read before it is shortened.
+# The dub does not have to follow the original exactly: assemble_dub.py lets it
+# run a few seconds behind or ahead, and speeds up only when it falls too far
+# behind. So a block can overrun a little, and shortening (which loses meaning)
+# is kept for the clear cases.
+TARGET = 1.15
 STRICT_FACTOR = 0.9
-MAX_ATTEMPTS = 5
+# A rewrite far below its budget lost content (or was cut off mid-answer).
+MIN_USEFUL_FRACTION = 0.5
+MIN_CHECKED_BUDGET = 20  # tiny budgets are legitimately met by very short texts
 
 
 # ---------------------------------------------------------
@@ -113,8 +119,14 @@ def measured_budget(words, ratio, target=TARGET):
 
 
 def clean_rewrite(text):
-    text = (text or "").strip()
+    """Only the rewritten sentence: small local models add preambles, labels and thinking."""
+    text = llm.strip_thinking(text)
     text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text).strip()
+    text = re.sub(r"^(?:[^\n]{0,40}?(?:viết lại|bản rút gọn|rewritten|kết quả|here is)[^\n]{0,40}:\s*\n+)", "",
+                  text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*(?:[-*]\s+|(?:vietnamese|tiếng việt|rewritten text|bản viết lại)\s*:\s*)", "",
+                  text, flags=re.IGNORECASE)
+    text = " ".join(text.split())  # one line: a voice-over has no line breaks
     return text.strip("\"'“”‘’«» \n")
 
 
@@ -122,26 +134,43 @@ def within_budget(text, budget):
     return bool(text) and word_count(text) <= budget
 
 
+def plausible_rewrite(text, budget):
+    """False for an empty rewrite or one so short that it must have dropped most of the meaning."""
+    if not text:
+        return False
+    return budget < MIN_CHECKED_BUDGET or word_count(text) >= budget * MIN_USEFUL_FRACTION
+
+
 def block_status(words, budget):
     return "unchanged" if words <= budget else "needs_rewrite"
 
 
 def pick_best(attempts, budget):
-    """Return (text, status) from rewrite attempts; ignores empty ones."""
+    """Return (text, status) from rewrite attempts; ignores empty ones.
+
+    Prefers the longest attempt that fits the budget (it keeps the most meaning);
+    if none fits, the shortest one.
+    """
     attempts = [text for text in attempts if text]
     if not attempts:
         return None, "still_over_budget"
-    best = min(attempts, key=word_count)
-    return best, "rewritten" if within_budget(best, budget) else "still_over_budget"
+    fitting = [text for text in attempts if within_budget(text, budget)]
+    if fitting:
+        return max(fitting, key=word_count), "rewritten"
+    return min(attempts, key=word_count), "still_over_budget"
 
 
 # ---------------------------------------------------------
-# Gemini (only used with --apply)
+# LLM (only used with --apply)
 # ---------------------------------------------------------
 
 def build_prompt(block, limit):
-    from glossary import GLOSSARY
+    from glossary import GLOSSARY, prompt_lines
 
+    glossary_rule = (
+        f"- Glossary, use these terms exactly where relevant:\n{prompt_lines(GLOSSARY)}\n"
+        if GLOSSARY else ""
+    )
     return f"""
 You are editing Vietnamese dubbing text so it fits a fixed time slot.
 
@@ -149,11 +178,16 @@ Rewrite the Vietnamese translation below in AT MOST {limit} words
 (words are separated by spaces).
 
 Requirements:
-- Keep the key meaning; drop minor details and repetition first.
+- Keep the key meaning; drop minor details, qualifiers and repetition first.
+- Write complete, grammatical sentences, never a list of fragments or a telegram:
+  a voice-over reads it aloud in one go, so it must flow like one person talking.
+- Keep the connecting words ("vì vậy", "nhưng", "tức là"...) that carry the
+  logic; join short clauses with commas instead of cutting them into pieces.
 - Use natural spoken Vietnamese suitable for a voice-over.
+- Use the limit well: aim for 80-100% of it, not far below.
+- No parentheses, quotation marks or symbols: everything is read aloud.
 - Do not invent facts that are not in the Chinese source.
-- Use these exact terms where relevant: {", ".join(GLOSSARY)}.
-- Return ONLY the rewritten Vietnamese text, no quotes, no explanation.
+{glossary_rule}- Return ONLY the rewritten Vietnamese text, no quotes, no explanation.
 
 Chinese source (reference):
 {block["source_text"]}
@@ -163,32 +197,18 @@ Current Vietnamese ({word_count(block["translated_text"])} words):
 """
 
 
-def rewrite_once(client, block, limit):
-    from google.genai import errors
-
-    from test_block_tts_duration import DailyQuotaExhausted, is_daily_quota
-
-    prompt = build_prompt(block, limit)
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        try:
-            response = client.models.generate_content(model=MODEL, contents=prompt)
-            return clean_rewrite(response.text)
-        except errors.ServerError as error:
-            if error.code != 503 or attempt == MAX_ATTEMPTS:
-                raise
-            delay = 2 ** attempt + random.uniform(0, 1)
-            print(f"Gemini busy (503). Retry {attempt + 1}/{MAX_ATTEMPTS} in {delay:.1f}s...")
-            time.sleep(delay)
-        except errors.ClientError as error:
-            if is_daily_quota(error):
-                raise DailyQuotaExhausted() from error
-            raise
+def rewrite_once(block, limit):
+    return clean_rewrite(llm.generate(build_prompt(block, limit), role="fit"))
 
 
-def fit_block(client, block, budget):
+def fit_block(block, budget):
     attempts = []
     for limit in (budget, max(1, math.floor(budget * STRICT_FACTOR))):
-        text = rewrite_once(client, block, limit)
+        text = rewrite_once(block, limit)
+        if not plausible_rewrite(text, budget):
+            print(f"  [{block['block_id']:02d}] rewrite of {word_count(text)} words for a "
+                  f"budget of {budget} looks cut off; ignoring it")
+            continue
         attempts.append(text)
         if within_budget(text, budget):
             break
@@ -247,13 +267,11 @@ def print_plan(rows):
               f"{row['predicted_budget']:>7} {row['budget']:>7} {row['ratio']:>5.2f} "
               f"{meas:>5} {row['source']:>9}  {action}")
     over = sum(row["over"] for row in rows)
-    print(f"\nOver budget: {over}/{len(rows)} blocks (= Gemini calls with --apply, "
+    print(f"\nOver budget: {over}/{len(rows)} blocks (= LLM calls with --apply, "
           f"plus up to {over} retries)")
 
 
-def apply_fits(rows, client):
-    from test_block_tts_duration import DailyQuotaExhausted
-
+def apply_fits(rows):
     fitted = []
     stopped = False
     for row in rows:
@@ -265,9 +283,9 @@ def apply_fits(rows, client):
             if not stopped:
                 print(f"[{block['block_id']:02d}] {words} -> <= {budget} words...", flush=True)
                 try:
-                    text, status = fit_block(client, block, budget)
-                except DailyQuotaExhausted:
-                    print("Daily Gemini quota exhausted. Stopping; remaining blocks keep original text.")
+                    text, status = fit_block(block, budget)
+                except (llm.QuotaExhausted, llm.LLMError) as error:
+                    print(f"LLM stopped ({error}). Stopping; remaining blocks keep original text.")
                     stopped = True
                     text = None
                 if text:
@@ -342,18 +360,27 @@ def run_local_checks():
     assert clean_rewrite('  "Xin chào."  ') == "Xin chào."
     assert clean_rewrite("```\nXin chào\n```") == "Xin chào"
     assert clean_rewrite(None) == ""
+    assert clean_rewrite("<think>đếm từ...</think>\nXin chào bạn.") == "Xin chào bạn."
+    assert clean_rewrite("Đây là bản viết lại:\n\nXin chào bạn.") == "Xin chào bạn."
+    assert clean_rewrite("Vietnamese: Xin chào\nbạn.") == "Xin chào bạn."
     assert within_budget("a b c", 3) and not within_budget("a b c d", 3)
     assert not within_budget("", 3)
     assert block_status(5, 5) == "unchanged" and block_status(6, 5) == "needs_rewrite"
 
-    assert pick_best(["a b", "a"], 2) == ("a", "rewritten")
+    assert pick_best(["a b", "a"], 2) == ("a b", "rewritten")
+    assert pick_best(["a", "a b c", "a b"], 2) == ("a b", "rewritten")
     assert pick_best(["a b c d", "a b c"], 2) == ("a b c", "still_over_budget")
     assert pick_best(["", ""], 2) == (None, "still_over_budget")
+
+    assert plausible_rewrite("a b c", 5) and not plausible_rewrite("", 5)
+    assert plausible_rewrite("a", 10)  # budgets under 20 words are not checked
+    assert plausible_rewrite(" ".join(["w"] * 15), 30)
+    assert not plausible_rewrite(" ".join(["w"] * 14), 30)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--apply", action="store_true", help="call Gemini and write the fitted file")
+    parser.add_argument("--apply", action="store_true", help="call the LLM and write the fitted file")
     parser.add_argument("--target", type=float, default=TARGET, help=f"budget multiplier (default {TARGET})")
     parser.add_argument("--blocks", help="only these block ids, e.g. 1-13 or 1,3,5-7")
     args = parser.parse_args()
@@ -380,6 +407,8 @@ def main():
     if fit_wps:
         print(f"For comparison, median over FIT+SPEED_UP only: {fit_wps:.2f}")
     print(f"TARGET: {args.target}")
+    if apply:
+        print(f"Rewriting with {llm.describe(role='fit')}")
     if selected is not None:
         print(f"Blocks: {args.blocks} ({len(blocks)} selected; only these are written)")
 
@@ -390,17 +419,7 @@ def main():
         print("\nDRY RUN: no API calls made. Pass --apply to rewrite.")
         return
 
-    import os
-
-    from dotenv import load_dotenv
-    from google import genai
-
-    load_dotenv(BASE_DIR / ".env")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is missing from .env")
-    with genai.Client(api_key=api_key) as client:
-        fitted = apply_fits(rows, client)
+    fitted = apply_fits(rows)
     save_fitted(fitted)
     print_fitted_summary(fitted)
 
