@@ -31,7 +31,7 @@ The result is `backend/dub_jobs_output/<video id>/dub_output/dubbed.mp4`.
 python web.py          # opens http://127.0.0.1:8765
 ```
 
-Paste a link, tick the options (Vietnamese subtitles, original volume, only the first N seconds) and press the button. The page shows the step the job is on and the last log lines, lets you cancel, and plays or downloads `dubbed.mp4` when it is done. Several links wait in a queue and run one after another. Finished videos from earlier runs are listed too.
+Paste a link, tick the options (Vietnamese subtitles, original volume, only the first N seconds) and press the button. The page shows the step the job is on and the last log lines, lets you cancel, and plays or downloads `dubbed.mp4` when it is done. Several links wait in a queue and run one after another. If an LLM runs out of its daily limit, the job is marked "Hết limit" (translated chunks are kept) and the queue **stops there** instead of moving on; press "Tiếp tục job này" once the limit is back to continue the same job, or skip it. If only the shortening step hit a limit, the video is still made (the lines that could not be shortened are sped up a little) and the queue waits for "Tiếp tục hàng chờ". The queue lives in memory: closing `web.py` forgets the waiting links (finished videos stay). Finished videos from earlier runs are listed too.
 
 It runs `dub.py` for you, so everything above applies (resume after an error: paste the same link again; `.env`, glossary). It listens only on this computer (`127.0.0.1`), needs no extra package, and is meant to run on the PC that has the GPU and the keys, not on a public server. Options: `--port 9000`, `--no-browser`. Stop it with Ctrl+C (a running job is stopped too).
 

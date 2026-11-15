@@ -28,6 +28,7 @@ button:disabled { opacity:.5; cursor:default; }
 .head { display:flex; justify-content:space-between; gap:10px; align-items:center; }
 .url { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
 .badge { font-size:12px; padding:2px 8px; border-radius:99px; border:1px solid var(--line); color:var(--muted); white-space:nowrap; }
+.badge.paused { color:#b45309; }
 .badge.done { color:var(--ok); } .badge.failed { color:var(--bad); } .badge.running { color:var(--accent); }
 .steps { display:flex; gap:6px; margin:10px 0 4px; }
 .steps span { flex:1; height:6px; border-radius:3px; background:var(--line); }
@@ -65,7 +66,7 @@ a { color:var(--accent); }
 </main>
 <script>
 const STEPS = ["Tải video", "Dịch", "Đọc giọng", "Ghép nhịp", "Xuất video"];
-const STATUS = {waiting:"Đang chờ", running:"Đang chạy", done:"Xong", failed:"Lỗi", cancelled:"Đã hủy"};
+const STATUS = {waiting:"Đang chờ", running:"Đang chạy", paused:"Hết limit", done:"Xong", failed:"Lỗi", cancelled:"Đã hủy"};
 const $ = id => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 
@@ -80,9 +81,12 @@ $("form").addEventListener("submit", async ev => {
   refresh();
 });
 
-async function cancel(id) {
-  await fetch(`/api/jobs/${id}/cancel`, {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+async function act(id, action) {
+  await fetch(`/api/jobs/${id}/${action}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
   refresh();
+}
+function button(text, onclick, ghost) {
+  const b = el("button", ghost ? "ghost" : "", text); b.onclick = onclick; return b;
 }
 
 function renderJob(job) {
@@ -90,12 +94,26 @@ function renderJob(job) {
   const head = el("div", "head");
   head.append(el("div", "url", job.url), el("span", "badge " + job.status, STATUS[job.status]));
   card.append(head);
-  if (job.status === "running" || job.status === "done") {
+  if (job.status === "running" || job.status === "done" || job.status === "paused") {
     const bar = el("div", "steps");
     STEPS.forEach((_, i) => bar.append(el("span", job.status === "done" || i + 1 < job.stage ? "on" : (i + 1 === job.stage ? "now" : ""))));
     card.append(bar);
     const label = job.status === "done" ? "Xong tất cả các bước" : (job.stage ? `Bước ${job.stage}/5: ${STEPS[job.stage - 1]}` : "Đang khởi động...");
     card.append(el("div", "note", label));
+  }
+  if (job.status === "paused") {
+    card.append(el("div", "note", "Model hết limit nên job dừng ở đây, phần đã dịch được giữ lại. Các link sau chưa chạy cho tới khi bạn bấm tiếp tục."));
+    card.append(el("div", "note", job.error));
+    const row = el("div", "opts");
+    row.append(button("Tiếp tục job này", () => act(job.id, "resume")), button("Bỏ job này, làm link kế", () => act(job.id, "cancel"), true));
+    card.append(row);
+  }
+  if (job.status === "done" && job.hold) {
+    card.append(el("div", "note", "Video đã xong nhưng model rút gọn hết limit nên một số câu chưa được rút gọn (được tăng tốc nhẹ thay thế). Hàng chờ đang dừng."));
+    card.append(el("div", "note", job.warning));
+    const row = el("div", "opts");
+    row.append(button("Tiếp tục hàng chờ", () => act(job.id, "resume")));
+    card.append(row);
   }
   if (job.status === "failed") {
     card.append(el("div", "note", job.error));
@@ -107,7 +125,7 @@ function renderJob(job) {
     log.scrollTop = log.scrollHeight;
   }
   if (job.status === "waiting" || job.status === "running") {
-    const b = el("button", "ghost", "Hủy"); b.onclick = () => cancel(job.id);
+    const b = button("Hủy", () => act(job.id, "cancel"), true);
     card.append(el("div", "", "")); card.lastChild.style.marginTop = "8px"; card.lastChild.append(b);
   }
   if (job.status === "done") card.append(el("div", "note", "Video nằm ở mục “Video đã xong” bên dưới."));
