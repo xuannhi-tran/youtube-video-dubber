@@ -7,16 +7,19 @@ Writes only inside dub_output/.
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import wave
 
-from assemble_dub import BASE_DIR, OUTPUT_DIR, TRACK_FILE
+from assemble_dub import BASE_DIR, OUTPUT_DIR, TIMELINE_FILE, TRACK_FILE
+import subtitles
 
 
 DEFAULT_OUT = OUTPUT_DIR / "dubbed.mp4"
+SUBS_FILE_NAME = "dub_subs.ass"  # written in dub_output/, referenced relatively by ffmpeg
 DEFAULT_ORIGINAL_VOLUME = 0.12
 AUDIO_BITRATE = "192k"
 AUDIO_RATE = 48000
@@ -28,6 +31,13 @@ COPYABLE_VIDEO_CODECS = {"h264", "hevc", "av1", "mpeg4"}
 # ---------------------------------------------------------
 # Pure helpers (covered by run_local_checks)
 # ---------------------------------------------------------
+
+def env_int(name, default=0):
+    try:
+        return int(os.getenv(name, default))
+    except ValueError:
+        return default
+
 
 def validate_volume(value):
     if not math.isfinite(value) or value < 0:
@@ -52,7 +62,17 @@ def choose_video_mode(codec):
             f"re-encode with libx264 because codec '{codec}' cannot be copied into mp4")
 
 
-def build_command(video, track, out, duration, original_volume, video_args, outro_from=None):
+def subtitle_filter(width, bar, ass_name=SUBS_FILE_NAME):
+    """Add a black strip under the picture, then draw the ASS file on it.
+
+    ffmpeg must run with dub_output/ as its working directory so the ASS path
+    stays a bare file name (no Windows drive-letter escaping).
+    """
+    return f"pad=iw:ih+{bar}:0:0:black,ass={ass_name}"
+
+
+def build_command(video, track, out, duration, original_volume, video_args, outro_from=None,
+                  video_filter=None):
     """Build the ffmpeg argument list; volume 0 drops the original audio.
 
     outro_from: when set, the output runs past the end of the dub track and the
@@ -75,6 +95,8 @@ def build_command(video, track, out, duration, original_volume, video_args, outr
         ]
     else:
         command += ["-map", "0:v:0", "-map", "1:a:0"]
+    if video_filter:
+        command += ["-vf", video_filter]
     command += [
         *video_args,
         "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", str(AUDIO_RATE),
@@ -102,6 +124,9 @@ def parse_ffprobe(data):
         kind = stream.get("codec_type")
         if kind in ("video", "audio") and info[kind] is None:
             info[kind] = {"codec": stream.get("codec_name"), "start": to_float(stream.get("start_time"))}
+            if kind == "video":
+                info[kind]["width"] = stream.get("width")
+                info[kind]["height"] = stream.get("height")
     return info
 
 
@@ -118,6 +143,10 @@ def parse_ffmpeg_info(text):
         stream = re.search(rf"Stream #\S+.*?: {label}: (\w+)", text)
         if stream:
             info[kind] = {"codec": stream.group(1), "start": start}
+            if kind == "video":
+                size = re.search(r"Video: .*?,\s*(\d{2,5})x(\d{2,5})", text)
+                info[kind]["width"], info[kind]["height"] = (
+                    (int(size.group(1)), int(size.group(2))) if size else (None, None))
     return info
 
 
@@ -205,10 +234,17 @@ def run_local_checks():
     assert "-filter_complex" not in replaced and "1:a:0" in replaced
     assert not any("amix" in part or "volume" in part for part in replaced)
 
+    assert subtitle_filter(1280, 124) == "pad=iw:ih+124:0:0:black,ass=dub_subs.ass"
+    filtered = build_command("v.mp4", "d.wav", "o.mp4", 10, 0.12, ["-c:v", "libx264"], video_filter="pad=iw:ih+2")
+    assert filtered[filtered.index("-vf") + 1] == "pad=iw:ih+2"
+    assert filtered.index("-vf") < filtered.index("-c:v") and "copy" not in filtered
+    assert "-vf" not in mixed
+
     probe_data = {
         "format": {"duration": "120.5"},
         "streams": [
-            {"codec_type": "video", "codec_name": "h264", "start_time": "0.000000"},
+            {"codec_type": "video", "codec_name": "h264", "start_time": "0.000000",
+             "width": 1280, "height": 720},
             {"codec_type": "audio", "codec_name": "aac", "start_time": "0.023220"},
         ],
     }
@@ -222,6 +258,8 @@ def run_local_checks():
             "  Stream #0:1[0x2](und): Audio: aac (LC), 44100 Hz, stereo\n")
     fallback = parse_ffmpeg_info(text)
     assert fallback["duration"] == 120.5 and fallback["video"]["codec"] == "h264"
+    assert (fallback["video"]["width"], fallback["video"]["height"]) == (1280, 720)
+    assert (parsed["video"]["width"], parsed["video"]["height"]) == (1280, 720)
     assert fallback["audio"]["codec"] == "aac" and offset_ms(fallback["audio"]["start"]) == 46
     assert "NON-ZERO" in describe_offset("Audio", {"start": 0.023})
     assert "NON-ZERO" not in describe_offset("Video", {"start": 0.0})
@@ -234,13 +272,47 @@ def parse_args():
     parser.add_argument("--original-volume", type=float, default=DEFAULT_ORIGINAL_VOLUME,
                         help="0 replaces the original audio entirely")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--subs", action="store_true",
+                        help="burn Vietnamese subtitles into a black bar added below the video")
+    parser.add_argument("--sub-font", default=os.getenv("SUB_FONT", subtitles.DEFAULT_FONT),
+                        help="installed font with Vietnamese diacritics (env SUB_FONT)")
+    parser.add_argument("--sub-font-size", type=int, default=env_int("SUB_FONT_SIZE"),
+                        help="font size in pixels of the video, 0 = automatic (env SUB_FONT_SIZE)")
+    parser.add_argument("--sub-bar", type=int, default=env_int("SUB_BAR"),
+                        help="height in pixels of the black bar, 0 = automatic (env SUB_BAR)")
     args = parser.parse_args()
     try:
+        if args.sub_font_size < 0 or args.sub_bar < 0:
+            raise ValueError("--sub-font-size and --sub-bar must be >= 0")
         validate_volume(args.original_volume)
         args.out = ensure_inside_output(args.out)
     except ValueError as error:
         parser.error(str(error))
     return args
+
+
+def prepare_subtitles(args, video):
+    """Write dub_subs.ass and return (video args, -vf filter, ffmpeg cwd, reason)."""
+    width, height = video.get("width"), video.get("height")
+    if not width or not height:
+        raise SystemExit("Could not read the video size, so the subtitle bar cannot be sized.")
+    if not TIMELINE_FILE.is_file():
+        raise SystemExit(f"{TIMELINE_FILE.name} not found: run the assemble step first "
+                         "(python dub.py URL --redo assemble --subs).")
+    try:
+        timeline = subtitles.load_timeline(TIMELINE_FILE)
+        script, count = subtitles.build_ass(timeline, width, height, args.sub_bar,
+                                            args.sub_font_size, args.sub_font)
+    except (ValueError, KeyError, TypeError) as error:
+        raise SystemExit(f"Cannot build subtitles from {TIMELINE_FILE.name}: {error}") from error
+    bar, size = subtitles.layout(width, height, args.sub_bar, args.sub_font_size)
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    (OUTPUT_DIR / SUBS_FILE_NAME).write_text(script, encoding="utf-8-sig")
+    print(f"Subtitles: {count} cues, {width}x{height} video + {bar}px bar, "
+          f"font {args.sub_font} {size}px")
+    video_args, _ = choose_video_mode(None)  # filters force a libx264 re-encode
+    return (video_args, subtitle_filter(width, bar), OUTPUT_DIR,
+            "re-encode with libx264 (needed to burn the subtitle bar)")
 
 
 def main():
@@ -256,13 +328,19 @@ def main():
         raise SystemExit(f"{args.video} has no audio stream; use --original-volume 0")
 
     video_args, reason = choose_video_mode(source["video"]["codec"])
+    video_filter, run_dir = None, None
+    if args.subs:
+        video_args, video_filter, run_dir, reason = prepare_subtitles(args, source["video"])
     # Keep what comes after the last dubbed line (music outro, credits) instead of cutting it.
     source_length = source["duration"]
     keep_outro = (args.original_volume > 0 and source_length is not None
                   and source_length > duration + OUTRO_MIN_SECONDS)
     output_length = source_length if keep_outro else duration
-    command = build_command(args.video, TRACK_FILE, args.out, output_length, args.original_volume,
-                            video_args, outro_from=duration if keep_outro else None)
+    # ffmpeg runs inside dub_output/ for subtitles, so every path must be absolute.
+    command = build_command(args.video.resolve(), TRACK_FILE.resolve(), args.out, output_length,
+                            args.original_volume,
+                            video_args, outro_from=duration if keep_outro else None,
+                            video_filter=video_filter)
 
     print(f"Probe: {tool}")
     print(f"Dub track length: {duration:.3f}s | source video length: "
@@ -278,7 +356,7 @@ def main():
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        subprocess.run(command, check=True, capture_output=True, text=True, cwd=run_dir)
     except subprocess.CalledProcessError as error:
         raise SystemExit(f"ffmpeg failed: {error.stderr.strip()}") from error
 
