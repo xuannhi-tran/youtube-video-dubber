@@ -404,7 +404,7 @@ def parse_args():
     parser.add_argument("--max-speed", type=float, default=1.3,
                         help="fastest reading speed when the dub must catch up (default 1.3)")
     parser.add_argument("--original", type=Path, help="original audio for preview_mix.wav")
-    parser.add_argument("--original-volume", type=float, default=0.15)
+    parser.add_argument("--original-volume", type=float, default=0.02)
     args = parser.parse_args()
     if not (math.isfinite(args.max_speed) and 1.0 <= args.max_speed <= 2.0):
         parser.error("need 1.0 <= --max-speed <= 2.0")

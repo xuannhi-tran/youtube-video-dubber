@@ -370,7 +370,7 @@ def parse_args():
     parser.add_argument("--redo", choices=STAGE_NAMES,
                         help="run this stage again, and every stage after it")
     parser.add_argument("--original-volume", type=float, default=None,
-                        help="volume of the original audio under the dub, 0 to 1 (default: mux_dub.py's 0.12, "
+                        help="volume of the original audio under the dub, 0 to 1 (default: mux_dub.py's 0.02, "
                              "0 drops it); changing it on a finished job only redoes the mux stage")
     parser.add_argument("--subs", action="store_true",
                         help="burn Vietnamese subtitles into a black bar added below the video (the original "

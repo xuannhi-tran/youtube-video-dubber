@@ -20,7 +20,7 @@ import subtitles
 
 DEFAULT_OUT = OUTPUT_DIR / "dubbed.mp4"
 SUBS_FILE_NAME = "dub_subs.ass"  # written in dub_output/, referenced relatively by ffmpeg
-DEFAULT_ORIGINAL_VOLUME = 0.12
+DEFAULT_ORIGINAL_VOLUME = 0.02
 AUDIO_BITRATE = "192k"
 AUDIO_RATE = 48000
 OUTRO_MIN_SECONDS = 0.5  # shorter tails are just trimmed
