@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import time
 
 import cuda_dlls  # keep before faster_whisper: it adds pip's CUDA DLLs to the search path
@@ -19,6 +20,9 @@ CACHE_FILE = WORKDIR / "translate_cache.json"
 # is translated: {"complete": bool, "segments": [...]}.
 PARTIAL_FILE = WORKDIR / "translated_partial.json"
 ANSWER_ATTEMPTS = 3  # fresh requests when the answer is not usable JSON
+# Cache entry (not a chunk) listing the models that filled the cache, so their
+# translations are reused after switching model; see find_cached().
+MODELS_ENTRY = "_models"
 # Part of every cache key: raise it when the translation prompt changes, so
 # chunks translated with an older prompt are translated again.
 PROMPT_VERSION = 2
@@ -154,12 +158,78 @@ def create_chunks(segments):
 # 3. TRANSLATE ONE CONTEXT WINDOW
 # ---------------------------------------------------------
 
+TEXT_KEYS = ("text", "translation", "translated_text", "vietnamese", "vi")
+
+
+def _loads_lenient(text):
+    """json.loads, then again without trailing commas and with typographic quotes fixed."""
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    repaired = re.sub(r",\s*([\]}])", r"\1", text)
+    repaired = repaired.replace("\u201c", '"').replace("\u201d", '"')
+    return json.loads(repaired)
+
+
+def _first_list(value):
+    """A list as it is, or the first list inside an object like {"segments": [...]}."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for item in value.values():
+            if isinstance(item, list):
+                return item
+    return None
+
+
 def extract_json_list(text):
-    """The JSON array in a model answer, tolerating Markdown fences and chatter around it."""
+    """The JSON array in a model answer.
+
+    Small local models often wrap it in Markdown fences or chatter, leave a
+    trailing comma, wrap it in an object, or stop before the closing bracket;
+    all of those are accepted here. Raises ValueError when nothing usable is left.
+    """
+    text = llm.strip_thinking(text)
+    text = re.sub(r"```[a-zA-Z]*", "", text).strip()
+    candidates = [text]
     first, last = text.find("["), text.rfind("]")
-    if first == -1 or last < first:
-        raise ValueError("no JSON array in the answer")
-    return json.loads(text[first:last + 1])
+    if first != -1 and last > first:
+        candidates.append(text[first:last + 1])
+    for candidate in candidates:
+        try:
+            found = _first_list(_loads_lenient(candidate))
+        except ValueError:
+            continue
+        if found is not None:
+            return found
+    # Last resort: the flat {...} objects one by one (e.g. an answer cut off before "]").
+    objects = []
+    for match in re.finditer(r"\{[^{}\[\]]*\}", text):
+        try:
+            objects.append(_loads_lenient(match.group(0)))
+        except ValueError:
+            continue
+    if objects:
+        return objects
+    raise ValueError("no JSON array in the answer")
+
+
+def normalize_translation(translated):
+    """Accept plain strings and other text keys from small models: [{"text": ...}, ...]."""
+    if not isinstance(translated, list):
+        return translated
+    result = []
+    for item in translated:
+        if isinstance(item, str):
+            item = {"text": item}
+        elif isinstance(item, dict) and not isinstance(item.get("text"), str):
+            for key in TEXT_KEYS[1:]:
+                if isinstance(item.get(key), str):
+                    item = {**item, "text": item[key]}
+                    break
+        result.append(item)
+    return result
 
 
 def check_translation(translated, expected):
@@ -246,36 +316,97 @@ Required format:
 """
 
 
-def translate_chunk(chunk, model=None, context=()):
+def retry_note(problem, expected):
+    """Told to the model after an unusable answer, so the next one is fixed."""
+    return (
+        f"\n\nYour previous answer could not be used ({problem}). Answer again with ONLY "
+        f"a JSON array of exactly {expected} objects, one per input segment, each with "
+        '"start", "end" and "text". No other text before or after the array.'
+    )
+
+
+def translate_chunk(chunk, model=None, context=(), generate=None):
+    """Vietnamese for every segment of `chunk`, as [{"start", "end", "text"}, ...].
+
+    An unusable answer is asked again (telling the model what was wrong). If a
+    chunk still fails, its two halves are translated separately: fewer segments
+    are easier for a small local model to count.
+    """
+    generate = generate or (lambda text: llm.generate(text, model=model, role="translate"))
     prompt = build_translation_prompt(chunk, context)
 
     last_problem = None
     for attempt in range(1, ANSWER_ATTEMPTS + 1):
-        answer = llm.generate(prompt, model=model)
+        request = prompt if last_problem is None else prompt + retry_note(last_problem, len(chunk))
+        answer = generate(request)
         try:
-            translated = extract_json_list(answer)
+            translated = normalize_translation(extract_json_list(answer))
             check_translation(translated, len(chunk))
             return translated
         except ValueError as error:  # includes json.JSONDecodeError
             last_problem = error
             print(f"Bad answer from the model ({error}). Attempt {attempt}/{ANSWER_ATTEMPTS}")
-    raise RuntimeError(f"The model never returned a usable translation: {last_problem}")
+    if len(chunk) == 1:
+        raise RuntimeError(f"The model never returned a usable translation: {last_problem}")
+    middle = len(chunk) // 2
+    print(f"Translating this chunk in two halves ({middle} + {len(chunk) - middle} segments)...")
+    first = translate_chunk(chunk[:middle], model, context, generate)
+    joined = list(context) + [(source["source_text"], item["text"]) for source, item in zip(chunk[:middle], first)]
+    second = translate_chunk(chunk[middle:], model, joined[-CONTEXT_SEGMENTS:], generate)
+    return first + second
 
 
 # ---------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------
 
-def chunk_key(chunk):
+def chunk_key(chunk, model_name=None):
     """Identifies a chunk's translation request, so a changed input is re-translated."""
     request = {
         "chunk": chunk,
         "glossary": GLOSSARY,
-        "model": llm.describe(),
+        "model": model_name or llm.describe(role="translate"),
         "prompt": PROMPT_VERSION,
     }
     encoded = json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def earlier_models(cache, current):
+    """Models whose translations may be in the cache, besides `current`.
+
+    Caches written before MODELS_ENTRY existed were filled by the default
+    Groq or Gemini model, so those are always tried too.
+    """
+    names = cache.get(MODELS_ENTRY, [])
+    names = names if isinstance(names, list) else []
+    defaults = [f"{provider}:{llm.DEFAULT_MODELS[provider]}" for provider in ("groq", "gemini")]
+    return [name for name in dict.fromkeys(names + defaults) if isinstance(name, str) and name != current]
+
+
+def find_cached(cache, chunk, current, reuse_other_models=True):
+    """(translation, model name) of a saved translation of `chunk`, or (None, None).
+
+    Prefers the current model. Unless told otherwise, a translation another
+    model made of the same chunk (same glossary, same prompt version) is kept:
+    switching from Groq to a local model must not throw away finished work.
+    """
+    key = chunk_key(chunk, current)
+    if key in cache:
+        return cache[key], current
+    if reuse_other_models:
+        for name in earlier_models(cache, current):
+            other = chunk_key(chunk, name)
+            if other in cache:
+                return cache[other], name
+    return None, None
+
+
+def remember_model(cache, name):
+    names = cache.get(MODELS_ENTRY)
+    names = names if isinstance(names, list) else []
+    if name not in names:
+        cache[MODELS_ENTRY] = names + [name]
 
 
 def load_cache():
@@ -289,9 +420,54 @@ def load_cache():
     return cache if isinstance(cache, dict) else {}
 
 
+def run_local_checks():
+    fenced = '<think>x</think>Here you go:\n```json\n[{"start": 0, "end": 1, "text": "Chào",},]\n```'
+    assert extract_json_list(fenced) == [{"start": 0, "end": 1, "text": "Chào"}]
+    assert extract_json_list('{"segments": [{"text": "a"}]}') == [{"text": "a"}]
+    assert extract_json_list('[{"text": "a"}, {"text": "b"}') == [{"text": "a"}, {"text": "b"}]  # cut off
+    assert extract_json_list('Kết quả [ghi chú] như sau: [{"text": "a"}]') == [{"text": "a"}]
+    try:
+        extract_json_list("Xin lỗi, tôi không thể dịch.")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an answer without JSON must be rejected")
+    assert normalize_translation(["a", {"translation": "b"}]) == [{"text": "a"}, {"translation": "b", "text": "b"}]
+
+    chunk = [{"start": float(i), "end": i + 1.0, "source_text": f"句{i}"} for i in range(3)]
+    def answer(texts):
+        return json.dumps([{"start": 0, "end": 0, "text": text} for text in texts], ensure_ascii=False)
+
+    asked = []
+    replies = iter(["không phải JSON", answer(["a", "b", "c"])])
+    def generate(prompt):
+        asked.append(prompt)
+        return next(replies)
+    assert [item["text"] for item in translate_chunk(chunk, generate=generate)] == ["a", "b", "c"]
+    assert "exactly 3 objects" in asked[1] and "exactly 3" not in asked[0]
+
+    # Always the wrong count for 3 segments: split into 1 + 2.
+    def by_size(prompt):
+        size = prompt.split("Chinese transcript to translate:")[1].count('"text"')
+        return answer(["x"] * (size + 1)) if size == 3 else answer([f"t{size}"] * size)
+    result = translate_chunk(chunk, generate=by_size)
+    assert [item["text"] for item in result] == ["t1", "t2", "t2"]
+
+    current, old = "ollama:qwen3:8b", f"groq:{llm.DEFAULT_MODELS['groq']}"
+    cache = {chunk_key(chunk, old): ["from groq"]}
+    assert find_cached(cache, chunk, current) == (["from groq"], old)
+    assert find_cached(cache, chunk, current, reuse_other_models=False) == (None, None)
+    cache[chunk_key(chunk, current)] = ["from qwen"]
+    assert find_cached(cache, chunk, current) == (["from qwen"], current)
+    remember_model(cache, current)
+    remember_model(cache, current)
+    assert cache[MODELS_ENTRY] == [current]
+    assert find_cached({chunk_key(chunk, "x:y"): ["z"], MODELS_ENTRY: ["x:y"]}, chunk, current) == (["z"], "x:y")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Transcribe (Whisper) and translate (Groq/Gemini) one audio file."
+        description="Transcribe (Whisper) and translate (Groq, Gemini or a local LLM) one audio file."
     )
     parser.add_argument(
         "--audio", type=Path, default=WORKDIR / "xiaowulang_original.mp3",
@@ -300,6 +476,11 @@ def parse_args():
     parser.add_argument(
         "--max-seconds", type=float, default=None,
         help="only process the first N seconds (default: the whole file)",
+    )
+    parser.add_argument(
+        "--retranslate", action="store_true",
+        help="translate chunks again that another model already translated "
+             "(default: keep them, translate only what is missing)",
     )
     args = parser.parse_args()
     if not args.audio.exists():
@@ -310,6 +491,7 @@ def parse_args():
 
 
 def main():
+    run_local_checks()
     args = parse_args()
     segments = load_or_transcribe(args.audio, args.max_seconds)
     if not segments:
@@ -325,33 +507,43 @@ def main():
     final_segments = []
     context = []
     write_json_atomic(PARTIAL_FILE, {"complete": False, "segments": []})
+    current = llm.describe(role="translate")
 
-    print("\n[3/3] Translating...")
+    print(f"\n[3/3] Translating with {current}...")
+    reused = 0
 
     for index, chunk in enumerate(chunks, start=1):
         start = chunk[0]["start"]
         end = chunk[-1]["end"]
-        key = chunk_key(chunk)
+        translated, made_by = find_cached(cache, chunk, current, not args.retranslate)
 
-        if key in cache:
+        if translated is not None:
+            by = "" if made_by == current else f" by {made_by}"
+            reused += made_by != current
             print(
                 f"Chunk {index}/{len(chunks)} "
-                f"({start:.2f}s -> {end:.2f}s): saved translation"
+                f"({start:.2f}s -> {end:.2f}s): saved translation{by}"
             )
-            translated = cache[key]
         else:
             print(
                 f"Chunk {index}/{len(chunks)} "
                 f"({start:.2f}s -> {end:.2f}s)..."
             )
+            saved = sum(key != MODELS_ENTRY for key in cache)
             try:
                 translated = translate_chunk(chunk, context=context)
             except llm.QuotaExhausted as error:
                 raise SystemExit(
                     f"\nQuota reached: {error}\n"
-                    f"{len(cache)} translated chunks are saved; run the same command later to continue."
+                    f"{saved} translated chunks are saved; run the same command later to continue."
                 ) from error
-            cache[key] = translated
+            except (llm.LLMError, RuntimeError) as error:
+                raise SystemExit(
+                    f"\nTranslation stopped: {error}\n"
+                    f"{saved} translated chunks are saved; fix the problem and run the same command again."
+                ) from error
+            cache[chunk_key(chunk, current)] = translated
+            remember_model(cache, current)
             write_json_atomic(CACHE_FILE, cache)
 
         for source, translation in zip(chunk, translated):
@@ -368,6 +560,9 @@ def main():
     write_json_atomic(OUTPUT_FILE, final_segments)
     write_json_atomic(PARTIAL_FILE, {"complete": True, "segments": final_segments})
 
+    if reused:
+        print(f"\nKept {reused} chunks translated by an earlier model "
+              "(--retranslate translates them again with the current one).")
     print("\n--------------------------------")
     print("Pipeline complete.")
     print(f"Segments: {len(final_segments)}")
