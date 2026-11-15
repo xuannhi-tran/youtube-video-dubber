@@ -1,6 +1,6 @@
 """One text-in, text-out LLM call for every prompt in the pipeline.
 
-Providers: groq, gemini, and two local OpenAI-compatible servers, ollama and
+Providers: groq, gemini (Google AI Studio), and two local OpenAI-compatible servers, ollama and
 lmstudio (no key, no daily quota). Settings come from backend/.env; everything
 except the keys is optional:
 
@@ -9,6 +9,7 @@ except the keys is optional:
     LLM_MODEL=...            # overrides the provider's default model
     LLM_MAX_TOKENS=900       # cap on the answer length; some models allow very little per minute
     GROQ_API_URL=...         # any OpenAI-compatible chat/completions endpoint
+    GEMINI_RPM=10            # requests per minute to stay under (free tier: 15 for Flash Lite)
 
 Translation (pipeline.py) and shortening (fit_blocks.py, speech.py) can use
 different LLMs; these override LLM_PROVIDER / LLM_MODEL for that job only:
@@ -23,7 +24,7 @@ Local servers:
     LOCAL_LLM_THINK=0        # 1 lets Qwen3 "think" first (slower; off by default)
 
 Run `python llm.py` to check the local logic and make one real call,
-or `python llm.py --list` to list the models your Groq key can use.
+or `python llm.py --list [groq|gemini]` to list the models your key can use.
 """
 
 import os
@@ -41,9 +42,11 @@ from workdir import SCRIPT_DIR
 load_dotenv(SCRIPT_DIR / ".env")
 
 GROQ_URL = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1/chat/completions")
+GEMINI_BASE = os.getenv("GEMINI_API_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+GEMINI_DEFAULT_RPM = 10
 DEFAULT_MODELS = {
     "groq": "openai/gpt-oss-120b",
-    "gemini": "gemini-3.6-flash",
+    "gemini": "gemini-3.5-flash-lite",
     "ollama": "qwen3:8b",
     "lmstudio": "qwen3-8b",
 }
@@ -250,26 +253,123 @@ def _groq(prompt, model, api_key, post, sleep):
     raise LLMError("Groq gave no answer")  # unreachable: the last attempt always returns/raises
 
 
-def _gemini(prompt, model, api_key, sleep):
-    from google import genai
-    from google.genai import errors
+def gemini_rpm():
+    value = os.getenv("GEMINI_RPM")
+    if not value:
+        return GEMINI_DEFAULT_RPM
+    try:
+        rpm = float(value)
+    except ValueError:
+        rpm = 0
+    if rpm <= 0:
+        raise ValueError(f"GEMINI_RPM must be a positive number, got {value!r}")
+    return rpm
 
+
+_last_request = {"gemini": None}
+
+
+def throttle(provider, rpm, sleep, now=time.monotonic):
+    """Wait so that this process sends at most `rpm` requests per minute to `provider`."""
+    interval = 60.0 / rpm
+    last = _last_request.get(provider)
+    if last is not None:
+        wait = last + interval - now()
+        if wait > 0:
+            sleep(wait)
+    _last_request[provider] = now()
+
+
+def gemini_error_info(response):
+    """(message, daily, wait_seconds) from a Gemini error response.
+
+    Google reports which quota was hit (a quotaId such as ...PerDay... or
+    ...PerMinute...) and, for a per-minute limit, a RetryInfo retryDelay like "34s".
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, list) and body:
+        body = body[0]
+    error = body.get("error", {}) if isinstance(body, dict) else {}
+    message = str(error.get("message") or response.text[:300])
+    details = error.get("details") if isinstance(error.get("details"), list) else []
+    quota_ids = " ".join(
+        str(violation.get("quotaId", "")) + " " + str(violation.get("quotaMetric", ""))
+        for item in details if isinstance(item, dict)
+        for violation in (item.get("violations") or []) if isinstance(violation, dict)
+    )
+    daily = "perday" in quota_ids.lower() or is_daily_limit(message)
+    wait = None
+    for item in details:
+        delay = item.get("retryDelay") if isinstance(item, dict) else None
+        if isinstance(delay, str) and re.fullmatch(r"[\d.]+s", delay):
+            wait = float(delay[:-1])
+    if wait is None:
+        wait = parse_duration(message)
+    return message, daily, wait
+
+
+def _gemini(prompt, model, api_key, post, sleep):
+    """Google AI Studio through its OpenAI-compatible endpoint.
+
+    A per-minute limit (RPM, TPM) is waited out; a per-day limit stops the run
+    with QuotaExhausted, since waiting would not help.
+    """
+    url = GEMINI_BASE.rstrip("/") + "/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    body = {
+        "model": model,
+        "temperature": TEMPERATURE,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if max_tokens_setting():
+        body["max_tokens"] = max_tokens_setting()
+    rpm = gemini_rpm()
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        last = attempt == MAX_ATTEMPTS
+        throttle("gemini", rpm, sleep)
         try:
-            with genai.Client(api_key=api_key) as client:
-                return client.models.generate_content(model=model, contents=prompt).text or ""
-        except errors.ServerError as error:
-            if error.code != 503 or attempt == MAX_ATTEMPTS:
-                raise LLMError(f"Gemini error {error.code}: {error}") from error
+            response = post(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
+        except httpx.TransportError as error:
+            if last:
+                raise LLMError(f"Gemini is unreachable: {error}") from error
             delay = backoff(attempt)
-            print(f"Gemini busy (503). Retry {attempt + 1}/{MAX_ATTEMPTS} "
+            print(f"Gemini connection problem ({error.__class__.__name__}). "
+                  f"Retry {attempt + 1}/{MAX_ATTEMPTS} in {delay:.1f}s...", flush=True)
+            sleep(delay)
+            continue
+
+        if response.status_code == 200:
+            try:
+                return response.json()["choices"][0]["message"]["content"] or ""
+            except (ValueError, KeyError, IndexError, TypeError) as error:
+                raise LLMError(f"Gemini sent an answer in an unexpected format: {response.text[:300]}") from error
+
+        message, daily, wait = gemini_error_info(response)
+        if response.status_code == 429:
+            if daily:
+                raise QuotaExhausted(
+                    f"The daily Gemini quota for {model} is used up (the free tier resets at midnight "
+                    f"Pacific time). Run the same command later, or set another model in .env "
+                    f"(TRANSLATE_LLM_MODEL / FIT_LLM_MODEL). Google said: {message[:200]}")
+            if last or (wait is not None and wait > MAX_WAIT_SECONDS):
+                raise QuotaExhausted(f"Gemini rate limit for {model} did not clear: {message[:300]}")
+            delay = (wait + 1.0) if wait is not None else max(backoff(attempt), 60.0 / rpm)
+            print(f"Gemini rate limit (429). Retry {attempt + 1}/{MAX_ATTEMPTS} "
+                  f"in {delay:.1f}s... ({message[:150]})", flush=True)
+            sleep(delay)
+        elif response.status_code >= 500 and not last:
+            delay = backoff(attempt)
+            print(f"Gemini busy ({response.status_code}). Retry {attempt + 1}/{MAX_ATTEMPTS} "
                   f"in {delay:.1f}s...", flush=True)
             sleep(delay)
-        except errors.ClientError as error:
-            if error.code == 429:
-                raise QuotaExhausted(str(error)[:300]) from error
-            raise LLMError(f"Gemini error {error.code}: {error}") from error
-    raise LLMError("Gemini gave no answer")
+        else:
+            hint = (" Run `python llm.py --list gemini` to see the model names your key can use."
+                    if response.status_code in (400, 404) else "")
+            raise LLMError(f"Gemini error {response.status_code}: {message[:300]}{hint}")
+    raise LLMError("Gemini gave no answer")  # unreachable
 
 
 def _local(prompt, provider, model, api_key, post, sleep):
@@ -356,14 +456,17 @@ def check_local_server(role=None, get=httpx.get):
     return None
 
 
-def list_groq_models(get=httpx.get):
-    """Model ids the Groq key can use, sorted."""
-    _, _, api_key = settings("groq")
-    url = GROQ_URL.rsplit("/chat/completions", 1)[0] + "/models"
-    response = get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=REQUEST_TIMEOUT)
+def list_models(provider="groq", get=httpx.get):
+    """Model ids the provider's key can use, sorted (`python llm.py --list [gemini]`)."""
+    _, _, api_key = settings(provider)
+    base = GROQ_URL.rsplit("/chat/completions", 1)[0] if provider == "groq" else GEMINI_BASE.rstrip("/")
+    response = get(base + "/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=REQUEST_TIMEOUT)
     if response.status_code != 200:
-        raise LLMError(f"Groq error {response.status_code}: {_error_message(response)}")
-    return sorted(item["id"] for item in response.json()["data"])
+        raise LLMError(f"{provider.capitalize()} error {response.status_code}: {_error_message(response)}")
+    return sorted(item["id"].removeprefix("models/") for item in response.json()["data"])
+
+
+list_groq_models = list_models  # the old name
 
 
 def generate(prompt, model=None, provider=None, role=None, post=httpx.post, sleep=time.sleep):
@@ -377,7 +480,7 @@ def generate(prompt, model=None, provider=None, role=None, post=httpx.post, slee
     elif is_local(chosen_provider):
         text = _local(prompt, chosen_provider, chosen_model, api_key, post, sleep)
     else:
-        text = _gemini(prompt, chosen_model, api_key, sleep)
+        text = _gemini(prompt, chosen_model, api_key, post, sleep)
     return strip_thinking(text)
 
 
@@ -483,6 +586,123 @@ def _check_roles_and_local():
     os.environ["GROQ_API_KEY"] = "test-key"
 
 
+class _GeminiResponse:
+    def __init__(self, status, content="ok", error=None, details=None, as_list=False):
+        self.status_code = status
+        self.headers = {}
+        if status == 200:
+            self._body = {"choices": [{"message": {"content": content}}]}
+        else:
+            body = {"error": {"code": status, "message": error or "failed", "details": details or []}}
+            self._body = [body] if as_list else body
+        self.text = str(self._body)
+
+    def json(self):
+        return self._body
+
+
+def _quota(quota_id, retry="34s"):
+    return [
+        {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+         "violations": [{"quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                         "quotaId": quota_id}]},
+        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry},
+    ]
+
+
+def _check_gemini():
+    """Gemini: per-minute limits are waited out, per-day limits stop the run."""
+    sleeps = []
+    os.environ["GEMINI_API_KEY"] = "gemini-key"
+    os.environ["GEMINI_RPM"] = "600000"  # no real waiting in these checks
+    assert settings("gemini")[:2] == ("gemini", DEFAULT_MODELS["gemini"])
+    assert "flash-lite" in DEFAULT_MODELS["gemini"]
+
+    post = _scripted_post(_GeminiResponse(200, "<think>x</think>Chào"))
+    assert generate("hi", provider="gemini", post=post, sleep=sleeps.append) == "Chào"
+    assert post.url == GEMINI_BASE + "/chat/completions"
+    assert post.calls[0]["headers"] == {"Authorization": "Bearer gemini-key"}
+
+    per_minute = _GeminiResponse(429, error="Quota exceeded for metric ... PerMinute",
+                                 details=_quota("GenerateRequestsPerMinutePerProjectPerModel-FreeTier"),
+                                 as_list=True)
+    post = _scripted_post(per_minute, _GeminiResponse(200, "ok"))
+    assert generate("hi", provider="gemini", post=post, sleep=sleeps.append) == "ok"
+    assert 35.0 in sleeps, sleeps  # retryDelay 34s + 1s
+
+    per_day = _GeminiResponse(429, error="Quota exceeded ...",
+                              details=_quota("GenerateRequestsPerDayPerProjectPerModel-FreeTier", "20s"))
+    post = _scripted_post(per_day)
+    try:
+        generate("hi", model="gemini-x", provider="gemini", post=post, sleep=sleeps.append)
+    except QuotaExhausted as error:
+        assert "daily" in str(error) and "gemini-x" in str(error) and len(post.calls) == 1
+    else:
+        raise AssertionError("a daily Gemini limit must stop without retrying")
+
+    long_wait = _GeminiResponse(429, error="slow down", details=_quota("GenerateRequestsPerMinutePerProjectPerModel", "300s"))
+    try:
+        generate("hi", provider="gemini", post=_scripted_post(long_wait), sleep=sleeps.append)
+    except QuotaExhausted:
+        pass
+    else:
+        raise AssertionError("a very long wait counts as exhausted")
+
+    # No details at all: the message text decides, then plain backoff.
+    post = _scripted_post(_GeminiResponse(429, error="Rate limit, please try again in 7.5s"), _GeminiResponse(200, "ok"))
+    sleeps.clear()
+    assert generate("hi", provider="gemini", post=post, sleep=sleeps.append) == "ok"
+    assert [wait for wait in sleeps if wait >= 1] == [8.5], sleeps
+
+    sleeps.clear()
+    post = _scripted_post(_GeminiResponse(503, error="busy"), httpx.ReadTimeout("slow"), _GeminiResponse(200, "ok"))
+    assert generate("hi", provider="gemini", post=post, sleep=sleeps.append) == "ok"
+    assert len([wait for wait in sleeps if wait >= 1]) == 2, sleeps
+    try:
+        generate("hi", provider="gemini", post=_scripted_post(_GeminiResponse(404, error="model not found")),
+                 sleep=sleeps.append)
+    except LLMError as error:
+        assert "--list gemini" in str(error)
+    else:
+        raise AssertionError("an unknown model must stop with a hint")
+
+    os.environ["LLM_MAX_TOKENS"] = "700"
+    post = _scripted_post(_GeminiResponse(200))
+    generate("hi", provider="gemini", post=post, sleep=sleeps.append)
+    assert post.calls[0]["json"]["max_tokens"] == 700
+    os.environ.pop("LLM_MAX_TOKENS")
+
+    # Spacing: at 10 requests a minute, a second request waits for the rest of 6 seconds.
+    waits, clock = [], [100.0]
+    _last_request["gemini"] = None
+    throttle("gemini", 10, waits.append, now=lambda: clock[0])
+    clock[0] = 102.0
+    throttle("gemini", 10, waits.append, now=lambda: clock[0])
+    assert waits == [4.0], waits
+    clock[0] = 200.0
+    throttle("gemini", 10, waits.append, now=lambda: clock[0])
+    assert waits == [4.0]
+    os.environ["GEMINI_RPM"] = "0"
+    try:
+        gemini_rpm()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("GEMINI_RPM must be positive")
+    assert _gemini_models_listing_ok()
+    os.environ.pop("GEMINI_RPM")
+    os.environ.pop("GEMINI_API_KEY")
+    _last_request["gemini"] = None
+
+
+def _gemini_models_listing_ok():
+    class Reply:
+        status_code = 200
+        def json(self):
+            return {"data": [{"id": "models/gemini-b"}, {"id": "models/gemini-a"}]}
+    return list_models("gemini", get=lambda url, **kw: Reply()) == ["gemini-a", "gemini-b"]
+
+
 def run_local_checks():
     assert strip_thinking("<think>hmm\nmore</think>\nXin chào") == "Xin chào"
     assert strip_thinking(None) == ""
@@ -501,13 +721,16 @@ def run_local_checks():
 
     names = ("GROQ_API_KEY", "LLM_PROVIDER", "LLM_MODEL", "LLM_MAX_TOKENS",
              "TRANSLATE_LLM_PROVIDER", "TRANSLATE_LLM_MODEL", "FIT_LLM_PROVIDER", "FIT_LLM_MODEL",
-             "LOCAL_LLM_URL", "LOCAL_LLM_TIMEOUT", "LOCAL_LLM_THINK", "LOCAL_LLM_API_KEY")
+             "LOCAL_LLM_URL", "LOCAL_LLM_TIMEOUT", "LOCAL_LLM_THINK", "LOCAL_LLM_API_KEY",
+             "GEMINI_API_KEY", "GEMINI_RPM")
     saved = {name: os.environ.get(name) for name in names}
     for name in names:
         os.environ.pop(name, None)
     os.environ["GROQ_API_KEY"] = "test-key"
     try:
         _check_roles_and_local()
+        os.environ["GROQ_API_KEY"] = "test-key"
+        _check_gemini()
         assert settings()[:2] == ("groq", DEFAULT_MODELS["groq"])
         assert settings("groq", "other-model")[1] == "other-model"
         assert describe() == f"groq:{DEFAULT_MODELS['groq']}"
@@ -578,7 +801,8 @@ if __name__ == "__main__":
     run_local_checks()
     print("llm local checks passed")
     if "--list" in sys.argv[1:]:
-        print("\n".join(list_groq_models()))
+        names = [arg for arg in sys.argv[1:] if arg in ("groq", "gemini")]
+        print("\n".join(list_models(names[0] if names else "groq")))
         raise SystemExit
     for role in ("translate", "fit"):
         try:

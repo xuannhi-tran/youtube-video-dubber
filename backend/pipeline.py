@@ -9,7 +9,8 @@ import cuda_dlls  # keep before faster_whisper: it adds pip's CUDA DLLs to the s
 from faster_whisper import WhisperModel
 
 import llm
-from glossary import GLOSSARY, prompt_lines, whisper_hotwords
+import glossary
+from glossary import GLOSSARY, prompt_lines, relevant, whisper_hotwords
 from workdir import WORKDIR
 
 OUTPUT_FILE = WORKDIR / "translated_segments.json"
@@ -283,10 +284,16 @@ def build_translation_prompt(chunk, context=()):
         for item in chunk
     ]
 
+    glossary_lines = prompt_lines(GLOSSARY, chunk_source_text(chunk))
     glossary_rule = (
-        "- Glossary: use these terms exactly as written:\n"
-        f"{prompt_lines(GLOSSARY)}\n"
-        if GLOSSARY else ""
+        "- Glossary: use these terms exactly as written, but only where the speaker really says "
+        "that word or name. Never put a glossary term in place of a different word, and write every "
+        "other Chinese personal name in its Sino-Vietnamese (Hán Việt) reading; foreign names "
+        "keep their original spelling:\n"
+        f"{glossary_lines}\n"
+        if glossary_lines else
+        "- Write Chinese personal names in their Sino-Vietnamese (Hán Việt) reading; foreign names "
+        "keep their original spelling.\n"
     )
     context_block = (
         "Previous part of the video, already translated (for continuity only, do "
@@ -398,11 +405,19 @@ def translate_chunk(chunk, model=None, context=(), generate=None):
 # MAIN
 # ---------------------------------------------------------
 
+def chunk_source_text(chunk):
+    return " ".join(item["source_text"] for item in chunk)
+
+
 def chunk_key(chunk, model_name=None):
-    """Identifies a chunk's translation request, so a changed input is re-translated."""
+    """Identifies a chunk's translation request, so a changed input is re-translated.
+
+    Only the glossary entries that apply to this chunk are part of the key, so
+    adding a name that is not in a chunk does not translate that chunk again.
+    """
     request = {
         "chunk": chunk,
-        "glossary": GLOSSARY,
+        "glossary": relevant(GLOSSARY, chunk_source_text(chunk)),
         "model": model_name or llm.describe(role="translate"),
         "prompt": PROMPT_VERSION,
     }
@@ -467,6 +482,7 @@ def load_cache():
 
 
 def run_local_checks():
+    glossary.run_local_checks()
     fenced = '<think>x</think>Here you go:\n```json\n[{"start": 0, "end": 1, "text": "Chào",},]\n```'
     assert extract_json_list(fenced) == [{"start": 0, "end": 1, "text": "Chào"}]
     assert extract_json_list('{"segments": [{"text": "a"}]}') == [{"text": "a"}]
@@ -521,6 +537,26 @@ def run_local_checks():
     replies = iter([answer(["quá用力"]), answer(["quá nhiều"])])
     assert translate_chunk(one, generate=lambda prompt: next(replies))[0]["text"] == "quá nhiều"
     assert translate_chunk(one, generate=lambda prompt: answer(["quá用力"]))[0]["text"] == "quá"
+
+    # Glossary pairs: only the entries whose source occurs in the passage reach the prompt and the cache key.
+    global GLOSSARY
+    saved_glossary = GLOSSARY
+    try:
+        GLOSSARY = ["黄晓明 => Hoàng Hiểu Minh", "态度 => thái độ", "khí chất"]
+        named = [{"start": 0.0, "end": 1.0, "source_text": "黄晓明很帅"}]
+        other = [{"start": 0.0, "end": 1.0, "source_text": "没有名字"}]
+        prompt = build_translation_prompt(named)
+        assert '"黄晓明" must be written as "Hoàng Hiểu Minh"' in prompt and "thái độ" not in prompt
+        assert "khí chất" in prompt and "Hán Việt" in prompt
+        assert "thái độ" not in build_translation_prompt(other) and "Hoàng" not in build_translation_prompt(other)
+        key_before = chunk_key(other, "x:y")
+        GLOSSARY = GLOSSARY + ["吴亦凡 => Ngô Diệc Phàm"]
+        assert chunk_key(other, "x:y") == key_before  # a name that is not in the chunk changes nothing
+        assert chunk_key(named, "x:y") != chunk_key(other, "x:y")
+        GLOSSARY = []
+        assert "Glossary" not in build_translation_prompt(named) and "Hán Việt" in build_translation_prompt(named)
+    finally:
+        GLOSSARY = saved_glossary
 
     current, old = "ollama:qwen3:8b", f"groq:{llm.DEFAULT_MODELS['groq']}"
     groq_text = [{"text": f"từ groq {i}"} for i in range(3)]

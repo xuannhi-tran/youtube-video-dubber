@@ -96,14 +96,28 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | Variable | Meaning |
 | --- | --- |
 | `LLM_PROVIDER` | `groq` (default), `gemini`, `ollama` or `lmstudio`. |
-| `LLM_MODEL` | Model name; each provider has a default (`openai/gpt-oss-120b` for Groq, `qwen3:8b` for Ollama). |
+| `LLM_MODEL` | Model name; each provider has a default (`openai/gpt-oss-120b` for Groq, `gemini-3.5-flash-lite` for Gemini, `qwen3:8b` for Ollama). |
 | `TRANSLATE_LLM_PROVIDER`, `TRANSLATE_LLM_MODEL` | Override the two above for translation only. |
 | `FIT_LLM_PROVIDER`, `FIT_LLM_MODEL` | Override them for shortening only (`fit_blocks.py` and `speech.py`). |
 | `LLM_MAX_TOKENS` | Cap on the answer length (some Groq models allow very little per minute). |
 | `GROQ_API_URL` | Any OpenAI-compatible chat endpoint instead of Groq's. |
+| `GEMINI_RPM` | Requests per minute this process may send to Gemini (default 10, the free Flash Lite limit is 15). |
 | `LOCAL_LLM_URL`, `LOCAL_LLM_TIMEOUT`, `LOCAL_LLM_THINK` | Local server settings, see below. |
 
-`python llm.py` checks the logic and makes one real call for translation and one for shortening, which is the quickest way to test your settings. `python llm.py --list` lists the models your Groq key can use.
+`python llm.py` checks the logic and makes one real call for translation and one for shortening, which is the quickest way to test your settings. `python llm.py --list` lists the models your Groq key can use, `python llm.py --list gemini` the ones your Gemini key can use (copy the name exactly). `backend/.env.example` has every setting with a short comment.
+
+### Which LLM for what
+
+Translation needs the model to understand context (names, terms, sentence boundaries) and is the stage where small local models struggle most; shortening is many short calls and uses quota quickly. A setup that spreads the free quotas:
+
+```
+TRANSLATE_LLM_PROVIDER=gemini
+TRANSLATE_LLM_MODEL=gemini-3.5-flash-lite
+FIT_LLM_PROVIDER=groq
+FIT_LLM_MODEL=openai/gpt-oss-120b
+```
+
+with a local Ollama model as the fallback: if a stage stops on a daily limit, run again with `TRANSLATE_LLM_PROVIDER=ollama` (or `FIT_LLM_PROVIDER=ollama`); windows already translated by another model are kept. Gemini limits differ a lot between models and accounts (a lite model usually allows far more requests per minute and per day than a full one); check yours in AI Studio and pick the model accordingly. A per-minute limit is waited out automatically; a per-day limit stops the run with a message, keeping everything finished (the free tier resets at midnight Pacific time). Requests are spaced to `GEMINI_RPM`; translation and speech run as separate processes, so keep that in mind if both use Gemini.
 
 ### Glossary
 
@@ -113,7 +127,17 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 ["khí chất", "tạp chí Time", "MBTI", "Fe (cảm xúc hướng ngoại)"]
 ```
 
-An entry may carry its meaning in parentheses: the LLM explains it once in words and afterwards uses only the term. Latin-script terms (MBTI, Fe...) are also given to Whisper as hotwords. If a job has no `glossary.json`, a default list of Bible-related terms from the first demo video is used. Changing the glossary changes the translation cache keys, so those windows are translated again.
+An entry may carry its meaning in parentheses: the LLM explains it once in words and afterwards uses only the term.
+
+An entry can also say what it stands for in the original speech, with `=>`. This is how Chinese names get their Sino-Vietnamese (Hán Việt) reading and how a word gets one fixed translation:
+
+```json
+["黄晓明 => Hoàng Hiểu Minh", "吴亦凡|Chris Wu => Ngô Diệc Phàm", "酷盖 => người ngầu", "态度 => thái độ"]
+```
+
+`|` separates several spellings of the same source. Such an entry is only given to the LLM for the passages whose original text contains its source (so one entry's term cannot leak into a passage about something else), and its sources are given to Whisper as hotwords, which helps it write the name correctly. Plain entries in Latin letters (MBTI, Fe) are used only where they occur in the original; a plain Vietnamese entry is always given, and the prompt tells the LLM to use it only where the speaker really means it. Without an entry, Chinese names are asked to be written in Hán Việt and foreign names in their original spelling, which a small model does unreliably, so add the names that matter.
+
+If a job has no `glossary.json`, a default list of Bible-related terms from the first demo video is used. Only the glossary entries that apply to a window are part of its cache key, so adding a name does not translate windows again that do not contain it; but adding a source also changes Whisper's hotwords, which re-runs the transcription once.
 
 ### Pronunciation
 
