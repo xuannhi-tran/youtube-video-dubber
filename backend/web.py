@@ -370,7 +370,7 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     left -= len(chunk)
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:  # the browser stopped asking for this part (seeking, closing)
             pass
 
     def read_json(self):
