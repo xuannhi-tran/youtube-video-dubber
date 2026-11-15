@@ -1,29 +1,29 @@
-import os
+import argparse
+import hashlib
 import json
-import random
+from pathlib import Path
 import time
 
-from dotenv import load_dotenv
+import cuda_dlls  # keep before faster_whisper: it adds pip's CUDA DLLs to the search path
 from faster_whisper import WhisperModel
-from google import genai
-from google.genai import errors
 
-from glossary import GLOSSARY
+import llm
+from glossary import GLOSSARY, prompt_lines, whisper_hotwords
+from workdir import WORKDIR
 
-load_dotenv()
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is missing from .env")
-
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-AUDIO_FILE = "xiaowulang_original.mp3"
-OUTPUT_FILE = "translated_segments.json"
-
-# For now we only process the first 90 seconds.
-MAX_AUDIO_SECONDS = 90
+OUTPUT_FILE = WORKDIR / "translated_segments.json"
+# Kept so an interrupted run does not redo Whisper or already-translated chunks.
+RAW_FILE = WORKDIR / "transcript_raw.json"
+CACHE_FILE = WORKDIR / "translate_cache.json"
+# Grows after every chunk so speech.py can start reading before the whole video
+# is translated: {"complete": bool, "segments": [...]}.
+PARTIAL_FILE = WORKDIR / "translated_partial.json"
+ANSWER_ATTEMPTS = 3  # fresh requests when the answer is not usable JSON
+# Part of every cache key: raise it when the translation prompt changes, so
+# chunks translated with an older prompt are translated again.
+PROMPT_VERSION = 2
+# Translated segments from the end of the previous chunk shown as context.
+CONTEXT_SEGMENTS = 8
 
 # Translation gets surrounding context rather than isolated Whisper segments.
 TARGET_CHUNK_SECONDS = 20
@@ -33,30 +33,37 @@ TARGET_CHUNK_SECONDS = 20
 # 1. TRANSCRIBE
 # ---------------------------------------------------------
 
-def transcribe_audio():
+def load_whisper():
+    """Prefer the local copy: asking Hugging Face first can hang for minutes."""
+    settings = {"device": "cuda", "compute_type": "float16"}
+    try:
+        return WhisperModel("large-v3", local_files_only=True, **settings)
+    except OSError:  # not in the local cache yet
+        print("Whisper large-v3 is not downloaded yet; downloading (about 3 GB)...")
+        return WhisperModel("large-v3", **settings)
+
+
+def transcribe_audio(audio_file, max_seconds, hotwords=None):
     print("\n[1/3] Loading Whisper large-v3...")
 
-    model = WhisperModel(
-        "large-v3",
-        device="cuda",
-        compute_type="float16",
-    )
+    model = load_whisper()
 
-    print("Transcribing...")
+    print("Transcribing..." + (f" (expecting: {hotwords})" if hotwords else ""))
 
     start_time = time.perf_counter()
 
     segments, info = model.transcribe(
-        AUDIO_FILE,
+        str(audio_file),
         language="zh",
         beam_size=5,
         vad_filter=True,
+        hotwords=hotwords,
     )
 
     result = []
 
     for segment in segments:
-        if segment.start >= MAX_AUDIO_SECONDS:
+        if max_seconds is not None and segment.start >= max_seconds:
             break
 
         result.append({
@@ -73,6 +80,42 @@ def transcribe_audio():
     )
 
     return result
+
+
+def write_json_atomic(path, data):
+    temporary_file = path.with_suffix(path.suffix + ".tmp")
+    temporary_file.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    # On Windows the replace fails while another process (speech.py) is reading
+    # the file; that read takes milliseconds, so try again briefly.
+    for attempt in range(50):
+        try:
+            temporary_file.replace(path)
+            return
+        except PermissionError:
+            if attempt == 49:
+                raise
+            time.sleep(0.1)
+
+
+def load_or_transcribe(audio_file, max_seconds):
+    """Whisper is the slow stage, so keep its output with the other job files."""
+    hotwords = whisper_hotwords(GLOSSARY)
+    stamp = {
+        "audio": audio_file.name,
+        "bytes": audio_file.stat().st_size,
+        "max_seconds": max_seconds,
+        "hotwords": hotwords,
+    }
+    if RAW_FILE.exists():
+        saved = json.loads(RAW_FILE.read_text(encoding="utf-8"))
+        if saved.get("stamp") == stamp:
+            print(f"Using saved transcript ({len(saved['segments'])} segments)")
+            return saved["segments"]
+    segments = transcribe_audio(audio_file, max_seconds, hotwords)
+    write_json_atomic(RAW_FILE, {"stamp": stamp, "segments": segments})
+    return segments
 
 
 # ---------------------------------------------------------
@@ -111,7 +154,29 @@ def create_chunks(segments):
 # 3. TRANSLATE ONE CONTEXT WINDOW
 # ---------------------------------------------------------
 
-def translate_chunk(chunk):
+def extract_json_list(text):
+    """The JSON array in a model answer, tolerating Markdown fences and chatter around it."""
+    first, last = text.find("["), text.rfind("]")
+    if first == -1 or last < first:
+        raise ValueError("no JSON array in the answer")
+    return json.loads(text[first:last + 1])
+
+
+def check_translation(translated, expected):
+    if not isinstance(translated, list) or len(translated) != expected:
+        count = len(translated) if isinstance(translated, list) else "no list"
+        raise ValueError(f"expected {expected} segments, got {count}")
+    for item in translated:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"].strip():
+            raise ValueError("a segment has no text")
+
+
+def context_lines(context):
+    """The end of the previous chunk, as 'Chinese => Vietnamese' lines."""
+    return "\n".join(f"{source} => {translation}" for source, translation in context)
+
+
+def build_translation_prompt(chunk, context=()):
     input_segments = [
         {
             "start": item["start"],
@@ -121,28 +186,48 @@ def translate_chunk(chunk):
         for item in chunk
     ]
 
-    prompt = f"""
-You are the translation component of a video dubbing system.
+    glossary_rule = (
+        "- Glossary: use these terms exactly as written:\n"
+        f"{prompt_lines(GLOSSARY)}\n"
+        if GLOSSARY else ""
+    )
+    context_block = (
+        "Previous part of the video, already translated (for continuity only, do "
+        "NOT translate it again; keep its forms of address and its terms):\n"
+        f"{context_lines(context)}\n\n"
+        if context else ""
+    )
 
-Translate these spoken Mandarin Chinese segments into natural spoken
-Vietnamese.
+    return f"""
+You are the translation component of a video dubbing system. The Vietnamese
+text is read aloud by a voice-over, so it must sound like natural speech.
 
-Requirements:
-- Preserve the speaker's meaning.
-- Translate for natural Vietnamese speech, not word-for-word subtitles.
-- Use all segments in this chunk as context.
-- The Chinese text comes from speech recognition and may contain minor
-  recognition errors.
-- Correct recognition errors only when the intended meaning is strongly
-  supported by context.
+The segments below are consecutive pieces of ONE passage of speech. Speech
+recognition cut it into short pieces, so a sentence often runs over several
+segments.
+
+How to translate:
+- First understand the whole passage, then translate it as fluent, natural
+  spoken Vietnamese (not word-for-word, not subtitle style).
+- Then split your Vietnamese back over the same segments, in order: each
+  segment holds the Vietnamese for its part. Inside a sentence you may move a
+  word or two across a segment boundary so the Vietnamese word order is natural.
+- Put . ? ! only where a sentence really ends. A segment that continues a
+  sentence ends with no punctuation or a comma, and the next segment starts in
+  lowercase.
+- Keep the speaker's meaning. The Chinese comes from speech recognition and may
+  contain recognition errors: correct them only when the context clearly shows
+  what was meant (a glossary term often is).
 - Do not invent facts when the transcript is uncertain.
-- Keep translations concise because they will be converted to speech.
-- Use these exact Vietnamese terms consistently, never synonyms:
-  {", ".join(GLOSSARY)}.
-- Preserve every start and end timestamp exactly.
-- Do not merge segments.
-- Do not split segments.
-- Return exactly the same number of segments as the input.
+- Keep it concise: it will be spoken in the same time as the original.
+- Forms of address: the speaker talks to the audience as "bạn" or "chúng ta".
+  Never call a person, a group of people or a personality type "nó"; use their
+  name, "người này", "những người này" or "họ". Refer to the same person the
+  same way throughout.
+- Write only what a voice-over can read: no parentheses, no quotation marks,
+  no brackets, no symbols.
+{glossary_rule}- Preserve every start and end timestamp exactly.
+- Return exactly the same number of segments as the input, in the same order.
 - Return ONLY valid JSON.
 
 Required format:
@@ -155,58 +240,80 @@ Required format:
   }}
 ]
 
-Chinese transcript:
+{context_block}Chinese transcript to translate:
 
 {json.dumps(input_segments, ensure_ascii=False)}
 """
 
-    max_attempts = 5
-    for attempt in range(1, max_attempts + 1):
+
+def translate_chunk(chunk, model=None, context=()):
+    prompt = build_translation_prompt(chunk, context)
+
+    last_problem = None
+    for attempt in range(1, ANSWER_ATTEMPTS + 1):
+        answer = llm.generate(prompt, model=model)
         try:
-            response = client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=prompt,
-            )
-            break
-        except errors.ServerError as error:
-            if error.code != 503 or attempt == max_attempts:
-                raise
-
-            delay = 2 ** attempt + random.uniform(0, 1)
-            print(
-                f"Gemini busy (503). Retry {attempt + 1}/{max_attempts} "
-                f"in {delay:.1f}s..."
-            )
-            time.sleep(delay)
-
-    text = response.text.strip()
-
-    # Gemini may occasionally wrap JSON in Markdown.
-    if text.startswith("```json"):
-        text = text[7:]
-    elif text.startswith("```"):
-        text = text[3:]
-
-    if text.endswith("```"):
-        text = text[:-3]
-
-    translated = json.loads(text.strip())
-
-    if len(translated) != len(chunk):
-        raise RuntimeError(
-            f"Gemini returned {len(translated)} segments "
-            f"but expected {len(chunk)}"
-        )
-
-    return translated
+            translated = extract_json_list(answer)
+            check_translation(translated, len(chunk))
+            return translated
+        except ValueError as error:  # includes json.JSONDecodeError
+            last_problem = error
+            print(f"Bad answer from the model ({error}). Attempt {attempt}/{ANSWER_ATTEMPTS}")
+    raise RuntimeError(f"The model never returned a usable translation: {last_problem}")
 
 
 # ---------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------
 
+def chunk_key(chunk):
+    """Identifies a chunk's translation request, so a changed input is re-translated."""
+    request = {
+        "chunk": chunk,
+        "glossary": GLOSSARY,
+        "model": llm.describe(),
+        "prompt": PROMPT_VERSION,
+    }
+    encoded = json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def load_cache():
+    if not CACHE_FILE.exists():
+        return {}
+    try:
+        cache = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeError):
+        print("Invalid translation cache; translating everything again")
+        return {}
+    return cache if isinstance(cache, dict) else {}
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Transcribe (Whisper) and translate (Groq/Gemini) one audio file."
+    )
+    parser.add_argument(
+        "--audio", type=Path, default=WORKDIR / "xiaowulang_original.mp3",
+        help="audio or video file to transcribe (default: xiaowulang_original.mp3)",
+    )
+    parser.add_argument(
+        "--max-seconds", type=float, default=None,
+        help="only process the first N seconds (default: the whole file)",
+    )
+    args = parser.parse_args()
+    if not args.audio.exists():
+        parser.error(f"--audio not found: {args.audio}")
+    if args.max_seconds is not None and args.max_seconds <= 0:
+        parser.error("--max-seconds must be positive")
+    return args
+
+
 def main():
-    segments = transcribe_audio()
+    args = parse_args()
+    segments = load_or_transcribe(args.audio, args.max_seconds)
+    if not segments:
+        raise SystemExit("Whisper found no speech in this audio.")
 
     print("\n[2/3] Creating translation chunks...")
 
@@ -214,20 +321,38 @@ def main():
 
     print(f"Created {len(chunks)} context chunks.")
 
+    cache = load_cache()
     final_segments = []
+    context = []
+    write_json_atomic(PARTIAL_FILE, {"complete": False, "segments": []})
 
     print("\n[3/3] Translating...")
 
     for index, chunk in enumerate(chunks, start=1):
         start = chunk[0]["start"]
         end = chunk[-1]["end"]
+        key = chunk_key(chunk)
 
-        print(
-            f"Chunk {index}/{len(chunks)} "
-            f"({start:.2f}s -> {end:.2f}s)..."
-        )
-
-        translated = translate_chunk(chunk)
+        if key in cache:
+            print(
+                f"Chunk {index}/{len(chunks)} "
+                f"({start:.2f}s -> {end:.2f}s): saved translation"
+            )
+            translated = cache[key]
+        else:
+            print(
+                f"Chunk {index}/{len(chunks)} "
+                f"({start:.2f}s -> {end:.2f}s)..."
+            )
+            try:
+                translated = translate_chunk(chunk, context=context)
+            except llm.QuotaExhausted as error:
+                raise SystemExit(
+                    f"\nQuota reached: {error}\n"
+                    f"{len(cache)} translated chunks are saved; run the same command later to continue."
+                ) from error
+            cache[key] = translated
+            write_json_atomic(CACHE_FILE, cache)
 
         for source, translation in zip(chunk, translated):
             final_segments.append({
@@ -236,23 +361,17 @@ def main():
                 "source_text": source["source_text"],
                 "translated_text": translation["text"],
             })
+        context = [(item["source_text"], item["translated_text"])
+                   for item in final_segments[-CONTEXT_SEGMENTS:]]
+        write_json_atomic(PARTIAL_FILE, {"complete": False, "segments": final_segments})
 
-    with open(
-        OUTPUT_FILE,
-        "w",
-        encoding="utf-8",
-    ) as file:
-        json.dump(
-            final_segments,
-            file,
-            ensure_ascii=False,
-            indent=2,
-        )
+    write_json_atomic(OUTPUT_FILE, final_segments)
+    write_json_atomic(PARTIAL_FILE, {"complete": True, "segments": final_segments})
 
     print("\n--------------------------------")
     print("Pipeline complete.")
     print(f"Segments: {len(final_segments)}")
-    print(f"Saved: {OUTPUT_FILE}")
+    print(f"Saved: {OUTPUT_FILE.name}")
     print("--------------------------------")
 
 

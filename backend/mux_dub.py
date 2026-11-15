@@ -20,6 +20,7 @@ DEFAULT_OUT = OUTPUT_DIR / "dubbed.mp4"
 DEFAULT_ORIGINAL_VOLUME = 0.12
 AUDIO_BITRATE = "192k"
 AUDIO_RATE = 48000
+OUTRO_MIN_SECONDS = 0.5  # shorter tails are just trimmed
 # Video codecs that can be stream-copied into an mp4 container.
 COPYABLE_VIDEO_CODECS = {"h264", "hevc", "av1", "mpeg4"}
 
@@ -51,10 +52,21 @@ def choose_video_mode(codec):
             f"re-encode with libx264 because codec '{codec}' cannot be copied into mp4")
 
 
-def build_command(video, track, out, duration, original_volume, video_args):
-    """Build the ffmpeg argument list; volume 0 drops the original audio."""
+def build_command(video, track, out, duration, original_volume, video_args, outro_from=None):
+    """Build the ffmpeg argument list; volume 0 drops the original audio.
+
+    outro_from: when set, the output runs past the end of the dub track and the
+    original audio returns to full volume from that second (music outro etc.).
+    """
     command = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-i", str(track)]
-    if original_volume > 0:
+    if original_volume > 0 and outro_from is not None:
+        command += [
+            "-filter_complex",
+            f"[0:a]volume='if(lt(t,{outro_from:.3f}),{original_volume},1)':eval=frame[o];"
+            "[o][1:a]amix=inputs=2:duration=longest:normalize=0[a]",
+            "-map", "0:v:0", "-map", "[a]",
+        ]
+    elif original_volume > 0:
         command += [
             "-filter_complex",
             f"[0:a]volume={original_volume}[o];"
@@ -181,6 +193,14 @@ def run_local_checks():
     assert mixed.index("-i") < mixed.index("-filter_complex")
     assert "-ss" not in mixed  # both inputs start at time 0
 
+    outro = build_command("v.mp4", "d.wav", "o.mp4", 80.0, 0.12, copy, outro_from=71.96)
+    assert outro[outro.index("-filter_complex") + 1] == (
+        "[0:a]volume='if(lt(t,71.960),0.12,1)':eval=frame[o];"
+        "[o][1:a]amix=inputs=2:duration=longest:normalize=0[a]")
+    assert outro[outro.index("-t") + 1] == "80.000"
+    # No outro_from keeps the old behaviour exactly.
+    assert build_command("v.mp4", "d.wav", "o.mp4", 71.96, 0.12, copy) == mixed
+
     replaced = build_command("v.mp4", "d.wav", "o.mp4", 10, 0, copy)
     assert "-filter_complex" not in replaced and "1:a:0" in replaced
     assert not any("amix" in part or "volume" in part for part in replaced)
@@ -236,12 +256,21 @@ def main():
         raise SystemExit(f"{args.video} has no audio stream; use --original-volume 0")
 
     video_args, reason = choose_video_mode(source["video"]["codec"])
-    command = build_command(args.video, TRACK_FILE, args.out, duration, args.original_volume, video_args)
+    # Keep what comes after the last dubbed line (music outro, credits) instead of cutting it.
+    source_length = source["duration"]
+    keep_outro = (args.original_volume > 0 and source_length is not None
+                  and source_length > duration + OUTRO_MIN_SECONDS)
+    output_length = source_length if keep_outro else duration
+    command = build_command(args.video, TRACK_FILE, args.out, output_length, args.original_volume,
+                            video_args, outro_from=duration if keep_outro else None)
 
     print(f"Probe: {tool}")
     print(f"Dub track length: {duration:.3f}s | source video length: "
           f"{source['duration'] if source['duration'] is not None else float('nan'):.3f}s")
     print(f"Video: {reason}")
+    if keep_outro:
+        print(f"Keeping the last {source_length - duration:.1f}s of the original audio "
+              "at full volume (after the dub ends)")
     print(describe_offset("Video", source["video"]))
     if args.original_volume > 0:
         print(describe_offset("Original audio", source["audio"]))
@@ -259,7 +288,8 @@ def main():
     print(f"Saved: {args.out.relative_to(BASE_DIR)}")
     print(f"Size: {args.out.stat().st_size / 1_000_000:.2f} MB")
     if real is not None:
-        print(f"Duration: {real:.3f}s (dub track {duration:.3f}s, difference {real - duration:+.3f}s)")
+        print(f"Duration: {real:.3f}s (dub track {duration:.3f}s, "
+              f"expected {output_length:.3f}s, difference {real - output_length:+.3f}s)")
         print("Note: -c:v copy cuts video on keyframes, so the video may differ slightly from the audio length.")
     print("--------------------------------")
 

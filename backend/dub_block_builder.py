@@ -4,13 +4,20 @@ import json
 from pathlib import Path
 import re
 
+from workdir import WORKDIR
 
-BASE_DIR = Path(__file__).resolve().parent
+
+BASE_DIR = WORKDIR
 INPUT_FILE = BASE_DIR / "translated_segments.json"
 OUTPUT_FILE = BASE_DIR / "dub_blocks.json"
 TARGET_MIN_DURATION = 4.0
 TARGET_MAX_DURATION = 10.0
 SOFT_MAX_DURATION = 12.0
+# A full stop only closes a block once it is this long. Speech recognition cuts
+# a speaker into phrases of a second or two, and every one of them gets its own
+# full stop in the translation; read separately, each sounds like a finished
+# sentence and the dub stops and starts all the time.
+SENTENCE_MIN_DURATION = 5.0
 ENUMERATION = re.compile(r"^(?:Một|Hai|Ba|Bốn|Năm|Sáu|Bảy|Tám|Chín|Mười|\d+)\s*:", re.I)
 
 
@@ -18,6 +25,11 @@ def load_segments(path=INPUT_FILE):
     segments = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(segments, list) or not segments:
         raise ValueError("Expected a non-empty segment list")
+    validate_segments(segments)
+    return segments
+
+
+def validate_segments(segments):
     for index, segment in enumerate(segments):
         if not 0 <= segment["start"] < segment["end"]:
             raise ValueError(f"Invalid timestamps in segment {index + 1}")
@@ -26,7 +38,6 @@ def load_segments(path=INPUT_FILE):
         for field in ("source_text", "translated_text"):
             if not isinstance(segment[field], str) or not segment[field].strip():
                 raise ValueError(f"Missing {field} in segment {index + 1}")
-    return segments
 
 
 def join_translated_text(texts):
@@ -57,7 +68,8 @@ def should_end_block(current, following, enumeration=False):
     if re.search(r"\bcâu hỏi(?: này)?[.:]$", text, re.I):
         return False
     if complete:
-        return True
+        # Close here if the block is long enough, or if the next phrase no longer fits.
+        return duration >= SENTENCE_MIN_DURATION or extended_duration > SOFT_MAX_DURATION
 
     # Commas are weaker boundaries: use one before a long passage grows further.
     # Do not cut unpunctuated fragments or colon introductions to meet a timer.
@@ -95,6 +107,17 @@ def build_blocks(segments):
     return blocks
 
 
+def final_blocks(segments, complete):
+    """Blocks that can no longer change while more segments are still coming.
+
+    A block ends by looking only at its own segments and the next one, so every
+    block except the last is settled; the last may still grow, unless the
+    segment list is complete.
+    """
+    blocks = build_blocks(segments)
+    return blocks if complete else blocks[:-1]
+
+
 def save_blocks(blocks, path=OUTPUT_FILE):
     path.write_text(json.dumps(blocks, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -129,11 +152,30 @@ def run_local_checks():
 
     assert len(sample(["Trước đây,", "mọi thứ khác."], [2, 3])) == 1
     assert len(sample(["Câu hỏi?", "Câu khác."], [8, 2])) == 2
-    assert len(sample(["Câu ngắn.", "Không liên quan."], [1, 1])) == 2
+    # Short phrases that each end in a full stop are read as one passage ...
+    assert len(sample(["Câu ngắn.", "Không liên quan."], [1, 1])) == 1
+    assert len(sample(["Một.", "Hai.", "Ba.", "Bốn."], [1.5, 1.5, 1.5, 1.5])) == 1
+    # ... until the block is long enough to close at a full stop,
+    assert len(sample(["Câu một.", "Câu hai.", "Câu ba."], [2, 3.5, 2])) == 2
+    assert [b["segment_count"] for b in sample(["Câu một.", "Câu hai.", "Câu ba."], [2, 3.5, 2])] == [2, 1]
+    # or the next phrase would make it too long.
+    assert len(sample(["Câu một.", "Câu hai."], [3, 10])) == 2
     assert len(sample(["Các mục:", "Một: A.", "Hai: B."], [2, 3, 3])) == 1
     assert len(sample(["Nghĩa là Kinh Thánh đối với", "thế giới này", "rất quan trọng."], [6, 4, 2])) == 1
     assert sample(["Nghĩa là", "phần tiếp theo."], [10, 3])[0]["duration"] == 13
     assert join_translated_text(["trước ,", "này ."]) == "trước, này."
+
+    # Settled blocks of a partial list are exactly the first blocks of the full one.
+    texts = ["Mở đầu.", "Rồi,", "tiếp tục mãi", "và kết thúc.", "Câu hỏi?", "Hết."]
+    full = []
+    for index, text in enumerate(texts):
+        full.append({"start": index * 3, "end": index * 3 + 3, "source_text": "原文", "translated_text": text})
+    complete = build_blocks(full)
+    for count in range(len(full) + 1):
+        settled = final_blocks(full[:count], complete=False)
+        assert settled == complete[:len(settled)]
+    assert final_blocks(full, complete=True) == complete
+    assert final_blocks([], complete=True) == []
 
 
 def print_summary(segments, blocks):
