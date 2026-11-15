@@ -167,9 +167,10 @@ def pick_best(attempts, budget):
 def build_prompt(block, limit):
     from glossary import GLOSSARY, prompt_lines
 
+    glossary_lines = prompt_lines(GLOSSARY, block["source_text"])
     glossary_rule = (
-        f"- Glossary, use these terms exactly where relevant:\n{prompt_lines(GLOSSARY)}\n"
-        if GLOSSARY else ""
+        f"- Glossary, use these terms exactly as written where they appear:\n{glossary_lines}\n"
+        if glossary_lines else ""
     )
     return f"""
 You are editing Vietnamese dubbing text so it fits a fixed time slot.
@@ -371,6 +372,17 @@ def run_local_checks():
     assert pick_best(["a", "a b c", "a b"], 2) == ("a b", "rewritten")
     assert pick_best(["a b c d", "a b c"], 2) == ("a b c", "still_over_budget")
     assert pick_best(["", ""], 2) == (None, "still_over_budget")
+
+    import glossary
+    saved = glossary.GLOSSARY
+    try:
+        glossary.GLOSSARY = ["黄晓明 => Hoàng Hiểu Minh", "态度 => thái độ"]
+        block = {"source_text": "黄晓明很帅", "translated_text": "anh ấy đẹp trai", "block_id": 1}
+        prompt = build_prompt(block, 5)
+        assert "Hoàng Hiểu Minh" in prompt and "thái độ" not in prompt
+        assert "Glossary" not in build_prompt({**block, "source_text": "没有名字"}, 5)
+    finally:
+        glossary.GLOSSARY = saved
 
     assert plausible_rewrite("a b c", 5) and not plausible_rewrite("", 5)
     assert plausible_rewrite("a", 10)  # budgets under 20 words are not checked
