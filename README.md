@@ -25,6 +25,16 @@ python dub.py "https://www.youtube.com/watch?v=VIDEO_ID"                      # 
 
 The result is `backend/dub_jobs_output/<video id>/dub_output/dubbed.mp4`.
 
+### Web page
+
+```
+python web.py          # opens http://127.0.0.1:8765
+```
+
+Paste a link, tick the options (Vietnamese subtitles, original volume, only the first N seconds) and press the button. The page shows the step the job is on and the last log lines, lets you cancel, and plays or downloads `dubbed.mp4` when it is done. Several links wait in a queue and run one after another. Finished videos from earlier runs are listed too.
+
+It runs `dub.py` for you, so everything above applies (resume after an error: paste the same link again; `.env`, glossary). It listens only on this computer (`127.0.0.1`), needs no extra package, and is meant to run on the PC that has the GPU and the keys, not on a public server. Options: `--port 9000`, `--no-browser`. Stop it with Ctrl+C (a running job is stopped too).
+
 ## How it works
 
 `dub.py` runs five stages for one video. Each video gets its own folder, `backend/dub_jobs_output/<video id>/`, so jobs never mix. Finished stages are skipped on a re-run, so after an interruption (a quota limit, a crash, Ctrl+C) you run the same command and it continues.
@@ -218,6 +228,7 @@ python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5
 
 | Script | Use |
 | --- | --- |
+| `web.py` | The local web page described above (`web_ui.html` is its page). |
 | `compare_translators.py JOB_ID` | Translates the same window of a job with several models, side by side, into `translator_compare_output/`. |
 | `compare_voices.py` | Reads a sample with every VieNeu preset voice and writes an `index.html` to listen and compare. |
 | `tts_speed_test.py` | Measures VieNeu speed on CPU vs GPU. |
