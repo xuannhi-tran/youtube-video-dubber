@@ -5,6 +5,7 @@
     python dub.py URL --redo speech        # redo this stage and everything after it
     python dub.py URL --glossary-only      # prepare the job folder, then stop
     python dub.py URL --original-volume 0.04   # mix the original voice lower (0 = drop it); redoes only the last stage
+    python dub.py URL --subs               # burn Vietnamese subtitles into a black bar under the video
 
 Each video gets its own folder, dub_jobs_output/<video id>/, and the result is
 dub_jobs_output/<video id>/dub_output/dubbed.mp4. Finished stages are skipped on
@@ -133,6 +134,15 @@ def run_local_checks():
 
     assert mux_volume_args(argparse.Namespace(original_volume=None)) == []
     assert mux_volume_args(argparse.Namespace(original_volume=0.04)) == ["--original-volume", 0.04]
+    quiet = dict(subs=False, sub_font=None, sub_font_size=None, sub_bar=None, redo=None, original_volume=None)
+    assert mux_subs_args(argparse.Namespace(**quiet)) == []
+    loud = argparse.Namespace(**{**quiet, "subs": True, "sub_font": "Tahoma", "sub_bar": 120})
+    assert mux_subs_args(loud) == ["--subs", "--sub-font", "Tahoma", "--sub-bar", 120]
+    assert stage_to_redo(argparse.Namespace(**quiet), STAGE_NAMES, True) is None
+    assert stage_to_redo(loud, STAGE_NAMES, True) == "mux"
+    assert stage_to_redo(loud, STAGE_NAMES, False) == "assemble"
+    assert stage_to_redo(argparse.Namespace(**{**quiet, "original_volume": 0.1}), STAGE_NAMES, False) == "mux"
+    assert stage_to_redo(argparse.Namespace(**{**quiet, "subs": True, "redo": "speech"}), STAGE_NAMES, True) == "speech"
     assert missing_modules(lambda module: module != "vieneu") == ["vieneu"]
     assert missing_modules(lambda module: True) == []
 
@@ -310,13 +320,39 @@ def mux_volume_args(args):
     return ["--original-volume", args.original_volume]
 
 
+def mux_subs_args(args):
+    """Subtitle options for mux_dub.py; without --subs nothing is passed (video stays as is)."""
+    if not args.subs:
+        return []
+    result = ["--subs"]
+    if args.sub_font:
+        result += ["--sub-font", args.sub_font]
+    if args.sub_font_size is not None:
+        result += ["--sub-font-size", args.sub_font_size]
+    if args.sub_bar is not None:
+        result += ["--sub-bar", args.sub_bar]
+    return result
+
+
+def stage_to_redo(args, done, has_timeline):
+    """Which stage to rewind to, or None. --redo wins; --subs/--original-volume only redo mux."""
+    if args.redo:
+        return args.redo
+    if args.subs and not has_timeline:
+        return "assemble"  # jobs from before subtitles existed have no dub_timeline.json
+    if args.subs or args.original_volume is not None:
+        return "mux"  # only the last stage depends on them
+    return None
+
+
 def stage_actions(url, job, args):
     return {
         "download": lambda: download(url, job, args.max_height),
         "transcribe": lambda: run_script(job, "pipeline.py", *transcribe_args(job, args)),
         "speech": lambda: run_script(job, "speech.py", *(["--fresh"] if args.redo == "speech" else [])),
         "assemble": lambda: run_script(job, "assemble_dub.py"),
-        "mux": lambda: run_script(job, "mux_dub.py", "--video", job / "source.mp4", *mux_volume_args(args)),
+        "mux": lambda: run_script(job, "mux_dub.py", "--video", job / "source.mp4",
+                                       *mux_volume_args(args), *mux_subs_args(args)),
     }
 
 
@@ -336,6 +372,15 @@ def parse_args():
     parser.add_argument("--original-volume", type=float, default=None,
                         help="volume of the original audio under the dub, 0 to 1 (default: mux_dub.py's 0.12, "
                              "0 drops it); changing it on a finished job only redoes the mux stage")
+    parser.add_argument("--subs", action="store_true",
+                        help="burn Vietnamese subtitles into a black bar added below the video (the original "
+                             "Chinese text stays visible); on a finished job only the last stage is redone")
+    parser.add_argument("--sub-font", default=None,
+                        help="font with Vietnamese diacritics (default: SUB_FONT in .env, else Arial)")
+    parser.add_argument("--sub-font-size", type=int, default=None,
+                        help="subtitle size in pixels of the video (default: automatic, or SUB_FONT_SIZE)")
+    parser.add_argument("--sub-bar", type=int, default=None,
+                        help="height of the black bar in pixels (default: automatic, or SUB_BAR)")
     parser.add_argument("--glossary-only", action="store_true",
                         help="create the job folder and glossary.json, then stop")
     args = parser.parse_args()
@@ -345,6 +390,9 @@ def parse_args():
         parser.error("--max-height must be positive")
     if args.original_volume is not None and not 0 <= args.original_volume <= 1:
         parser.error("--original-volume must be between 0 and 1")
+    for name in ("sub_font_size", "sub_bar"):
+        if getattr(args, name) is not None and getattr(args, name) < 0:
+            parser.error(f"--{name.replace('_', '-')} must be 0 or more")
     return args
 
 
@@ -366,10 +414,9 @@ def main():
         return
 
     state = load_state(job, args.max_seconds)
-    if args.redo:
-        state["done"] = forget_from(state["done"], args.redo)
-    elif args.original_volume is not None:
-        state["done"] = forget_from(state["done"], "mux")  # only the last stage depends on it
+    redo = stage_to_redo(args, state["done"], (job / "dub_output" / "dub_timeline.json").is_file())
+    if redo:
+        state["done"] = forget_from(state["done"], redo)
     save_state(job, state)
 
     def finish(name):

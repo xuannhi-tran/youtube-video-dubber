@@ -52,6 +52,7 @@ python dub.py URL --redo transcribe      # translate again (Whisper's saved tran
 python dub.py URL --redo speech          # forget earlier rewrites and read again
 python dub.py URL --redo mux             # only the last stage
 python dub.py URL --original-volume 0.04 # remix with quieter original voice (0 drops it); redoes only the mux
+python dub.py URL --subs                 # burn Vietnamese subtitles in (see below); redoes only the mux
 python dub.py URL --glossary-only        # create the job folder and glossary.json, then stop
 ```
 
@@ -69,7 +70,7 @@ python dub.py URL --glossary-only        # create the job folder and glossary.js
 | `dub_blocks.json`, `dub_blocks_fitted.json` | Blocks before and after shortening. |
 | `block_tts_output/`, `block_tts_duration_results_fitted.json` | The clips and their measured lengths. |
 | `speech_state.json`, `dub_state.json` | Progress, so every stage can resume. |
-| `dub_output/` | `dub_track.wav`, per-block files, and `dubbed.mp4`. |
+| `dub_output/` | `dub_track.wav`, per-block files, `dub_timeline.json` (when each line is spoken), `dub_subs.ass` (with `--subs`) and `dubbed.mp4`. |
 
 Everything under `*_output/`, plus `.env`, audio and video, is git-ignored.
 
@@ -83,6 +84,23 @@ You need:
 - An **LLM** for translation and shortening: a Groq or Gemini key, or a local Ollama / LM Studio model.
 
 `dub.py` checks all of this (packages, ffmpeg, LLM key, local server and model) before it starts, and lists what is missing.
+
+### Vietnamese subtitles
+
+```
+python dub.py URL --subs                       # add a black bar under the video with Vietnamese subtitles
+python dub.py URL --subs --sub-bar 160         # taller bar (pixels)
+python dub.py URL --subs --sub-font-size 40    # bigger text (pixels of the video)
+python dub.py URL --subs --sub-font Tahoma     # another installed font
+```
+
+The video gets a black bar added **below** the picture, so the original (Chinese) subtitles stay fully visible and the Vietnamese text sits right under them. The text is exactly what the voice reads (after shortening) and appears when that line is actually played in the final dub, taken from `dub_output/dub_timeline.json`. Long sentences are split over several cues of at most two lines.
+
+- Without `--subs` nothing changes: the video is copied as before (fast). With `--subs` the video is re-encoded once (libx264, crf 18), so the mux takes longer and the file is a bit larger.
+- On a finished job `--subs` only redoes the last stage. A job made before this option has no `dub_timeline.json`, so the assemble stage is redone too (quick, no LLM or voice).
+- Without `--sub-bar` / `--sub-font-size` the sizes are automatic: the bar is about 17% of the video height and the text fits two lines. Vertical (TikTok) videos get a width-limited font size so lines still fit.
+- The font must be installed and contain Vietnamese diacritics. The default is Arial (fine on Windows and macOS); if the letters look wrong, set another font.
+- Run again without `--subs` and `--redo mux` to get the plain video back.
 
 ### Settings
 
@@ -103,6 +121,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `GROQ_API_URL` | Any OpenAI-compatible chat endpoint instead of Groq's. |
 | `GEMINI_RPM` | Requests per minute this process may send to Gemini (default 10, the free Flash Lite limit is 15). |
 | `LOCAL_LLM_URL`, `LOCAL_LLM_TIMEOUT`, `LOCAL_LLM_THINK` | Local server settings, see below. |
+| `SUB_FONT`, `SUB_FONT_SIZE`, `SUB_BAR` | Defaults for `--subs`: font name (default `Arial`), text size and bar height in pixels (0 = automatic). The command-line options win. |
 | `TTS_VOICE` | VieNeu preset voice, default `xuan_vinh` (e.g. `thien_minh`). `python compare_voices.py` lets you listen to every voice. Changing it reads all blocks again (clips are keyed by voice); the speech rate is calibrated per voice. |
 
 `python llm.py` checks the logic and makes one real call for translation and one for shortening, which is the quickest way to test your settings. `python llm.py --list` lists the models your Groq key can use, `python llm.py --list gemini` the ones your Gemini key can use (copy the name exactly). `backend/.env.example` has every setting with a short comment.
