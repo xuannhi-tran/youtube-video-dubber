@@ -236,6 +236,14 @@ def normalize_translation(translated):
 CJK = re.compile(r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]")
 
 
+SENTENCE_END = (".", "?", "!", "…", "。", "？", "！")
+MIN_SEGMENTS_FOR_SENTENCE_CHECK = 6
+
+
+class NoSentenceEnds(ValueError):
+    """A long passage without a single full stop: the dub cannot be cut into sentences."""
+
+
 class ChineseLeft(ValueError):
     """The 'Vietnamese' still contains Chinese characters."""
 
@@ -251,6 +259,10 @@ def check_translation(translated, expected):
     for item in translated:
         if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"].strip():
             raise ValueError("a segment has no text")
+    if expected >= MIN_SEGMENTS_FOR_SENTENCE_CHECK and not any(
+        item["text"].rstrip().rstrip("\"'”’»)]}").endswith(SENTENCE_END) for item in translated
+    ):
+        raise NoSentenceEnds("no segment ends a sentence with . ? or !")
     for item in translated:
         if CJK.search(item["text"]):
             raise ChineseLeft(f"Chinese characters left in the translation: {CJK.search(item['text']).group(0)!r}")
@@ -297,9 +309,10 @@ How to translate:
 - Then split your Vietnamese back over the same segments, in order: each
   segment holds the Vietnamese for its part. Inside a sentence you may move a
   word or two across a segment boundary so the Vietnamese word order is natural.
-- Put . ? ! only where a sentence really ends. A segment that continues a
-  sentence ends with no punctuation or a comma, and the next segment starts in
-  lowercase.
+- Put . ? ! only where a sentence really ends, and ALWAYS put one there: a
+  passage of this length contains several sentences, so several segments must
+  end with . ? or !. A segment that continues a sentence ends with no
+  punctuation or a comma, and the next segment starts in lowercase.
 - Keep the speaker's meaning. The Chinese comes from speech recognition and may
   contain recognition errors: correct them only when the context clearly shows
   what was meant (a glossary term often is).
@@ -335,7 +348,8 @@ def retry_note(problem, expected):
     """Told to the model after an unusable answer, so the next one is fixed."""
     return (
         f"\n\nYour previous answer could not be used ({problem}). Write every segment in Vietnamese "
-        "only: translate or transliterate Chinese words, never leave Chinese characters. Answer again with ONLY "
+        "only: translate or transliterate Chinese words, never leave Chinese characters, and end each "
+        "sentence with . ? or ! (segments that continue a sentence end with a comma or nothing). Answer again with ONLY "
         f"a JSON array of exactly {expected} objects, one per input segment, each with "
         '"start", "end" and "text". No other text before or after the array.'
     )
@@ -471,6 +485,15 @@ def run_local_checks():
     else:
         raise AssertionError("Chinese characters in the translation must be rejected")
     check_translation([{"text": "Huang Xiaoming và Wu Tianle, 100%"}], 1)
+    flat = [{"text": f"đoạn {i}"} for i in range(6)]
+    try:
+        check_translation(flat, 6)
+    except NoSentenceEnds:
+        pass
+    else:
+        raise AssertionError("a long passage with no sentence end must be rejected")
+    check_translation(flat[:5], 5)  # short windows may have no full stop
+    check_translation(flat[:5] + [{"text": 'Anh ấy nói "xong rồi."'}], 6)
     assert strip_cjk("đừng quá用力 nhé。") == "đừng quá nhé"
     assert normalize_translation(["a", {"translation": "b"}]) == [{"text": "a"}, {"translation": "b", "text": "b"}]
 
