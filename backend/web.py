@@ -4,7 +4,8 @@
     python web.py --port 9000 --no-browser
 
 It only listens on this computer (127.0.0.1) and runs dub.py for you, one link
-at a time; extra links wait in a queue. Needs no extra package. Everything
+at a time; extra links wait in a queue. When a limit stops a job, the page says so
+and the queue waits until you press the resume button. Needs no extra package. Everything
 dub.py does (resume after an error, glossary, .env settings) works the same.
 """
 
@@ -80,6 +81,15 @@ def read_progress(progress, line):
     return progress
 
 
+def classify_line(line):
+    """'quota' when translation stopped on a limit; 'llm_stopped' when shortening did."""
+    if line.startswith("Quota reached:"):
+        return "quota"
+    if line.startswith("LLM stopped ("):
+        return "llm_stopped"
+    return None
+
+
 def parse_range(header, size):
     """Return (start, end) inclusive for a 'bytes=a-b' header, or None when absent/invalid."""
     match = re.fullmatch(r"bytes=(\d*)-(\d*)", (header or "").strip())
@@ -139,6 +149,10 @@ def run_local_checks():
     read_progress(progress, "[2/5] transcribe: again")  # never goes backwards
     assert progress["stage"] == 3
 
+    assert classify_line("Quota reached: daily limit") == "quota"
+    assert classify_line("LLM stopped (limit). The remaining blocks") == "llm_stopped"
+    assert classify_line("Chunk 1/6 ...") is None and classify_line("translate | Quota reached: x") is None
+
     assert parse_range("bytes=0-9", 100) == (0, 9)
     assert parse_range("bytes=90-", 100) == (90, 99)
     assert parse_range("bytes=-10", 100) == (90, 99)
@@ -169,7 +183,7 @@ class Jobs:
         with self.lock:
             item = {"id": next(self.ids), "url": url, "arguments": arguments, "status": "waiting",
                     "video_id": None, "stage": 0, "stage_name": "", "log": [], "error": "",
-                    "cancel": False, "started": None, "ended": None}
+                    "cancel": False, "started": None, "ended": None, "hold": False, "warning": ""}
             self.items.append(item)
             return item["id"]
 
@@ -178,14 +192,32 @@ class Jobs:
             for item in self.items:
                 if item["id"] != job_id:
                     continue
-                if item["status"] == "waiting":
-                    item["status"] = "cancelled"
+                if item["status"] in ("waiting", "paused"):
+                    item["status"], item["hold"] = "cancelled", False
                 elif item["status"] == "running":
                     item["cancel"] = True
                     if self.process:
                         kill_tree(self.process)
                 return True
         return False
+
+    def resume(self, job_id):
+        """Continue a job that stopped on a limit, or release the queue after a shortening stop."""
+        with self.lock:
+            for item in self.items:
+                if item["id"] != job_id:
+                    continue
+                if item["status"] == "paused":
+                    item["status"], item["error"], item["hold"] = "waiting", "", False
+                    return True
+                if item["status"] == "done" and item["hold"]:
+                    item["hold"] = False
+                    return True
+        return False
+
+    def blocked(self):
+        """The queue waits while a job is paused on a limit or a finished one is not released."""
+        return any(i["status"] == "paused" or i["hold"] for i in self.items)
 
     def snapshot(self):
         with self.lock:
@@ -195,7 +227,8 @@ class Jobs:
     def worker(self):
         while True:
             with self.lock:
-                item = next((i for i in self.items if i["status"] == "waiting"), None)
+                item = None if self.blocked() else next(
+                    (i for i in self.items if i["status"] == "waiting"), None)
                 if item:
                     item["status"], item["started"] = "running", time.time()
             if item is None:
@@ -205,6 +238,7 @@ class Jobs:
 
     def run(self, item):
         progress = {"video_id": None, "stage": 0, "stage_name": ""}
+        item["error"] = item["warning"] = ""
         command = [sys.executable, "-u", str(SCRIPT_DIR / "dub.py"), item["url"], *item["arguments"]]
         environment = {**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"}
         try:
@@ -225,6 +259,11 @@ class Jobs:
                 item.update(progress)
                 item["log"].append(line[:300])
                 del item["log"][:-LOG_LINES]
+                kind = classify_line(line)
+                if kind == "quota":
+                    item["error"] = line[:300]
+                elif kind == "llm_stopped":
+                    item["warning"] = line[:300]
         code = process.wait()
         with self.lock:
             self.process = None
@@ -232,14 +271,18 @@ class Jobs:
         if item["cancel"]:
             self.finish(item, "cancelled", "")
         elif code == 0 and progress["video_id"] and video.is_file():
-            self.finish(item, "done", "")
+            # Shortening hit a limit: the video exists but some lines were not shortened.
+            self.finish(item, "done", "", hold=bool(item["warning"]))
+        elif item["error"].startswith("Quota reached:"):
+            self.finish(item, "paused", item["error"])
         else:
             tail = [line for line in item["log"] if line.strip()][-3:]
             self.finish(item, "failed", " | ".join(tail) or f"dub.py dừng với mã {code}")
 
-    def finish(self, item, status, error):
+    def finish(self, item, status, error, hold=False):
         with self.lock:
             item["status"], item["error"], item["ended"] = status, error, time.time()
+            item["hold"] = hold
 
 
 def finished_videos():
@@ -357,8 +400,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(error)}, 400)
                 return
             self.send_json({"id": JOBS.add(url, arguments)})
-        elif re.fullmatch(r"/api/jobs/\d+/cancel", path):
-            ok = JOBS.cancel(int(path.split("/")[3]))
+        elif re.fullmatch(r"/api/jobs/\d+/(cancel|resume)", path):
+            action = JOBS.cancel if path.endswith("/cancel") else JOBS.resume
+            ok = action(int(path.split("/")[3]))
             self.send_json({"ok": ok}, 200 if ok else 404)
         else:
             self.send_json({"error": "not found"}, 404)
