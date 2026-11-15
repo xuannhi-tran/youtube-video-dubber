@@ -142,26 +142,30 @@ function playerFor(id) {
   return wrap;
 }
 
-let lastKey = "";
+let lastJobs = "", lastVideos = "";
 async function refresh() {
   let data;
   try { data = await (await fetch("/api/state")).json(); } catch { return; }
-  const key = JSON.stringify(data);
-  if (key === lastKey) return;
-  if ([...document.querySelectorAll("video")].some(v => !v.paused)) return;  // do not cut a playing video
-  lastKey = key;
-  const jobs = $("jobs"); jobs.replaceChildren();
-  if (!data.jobs.length) jobs.append(el("p", "note", "Chưa có link nào."));
-  [...data.jobs].reverse().forEach(j => jobs.append(renderJob(j)));
-  const list = $("videos"); list.replaceChildren();
-  if (!data.videos.length) list.append(el("p", "note", "Chưa có video nào."));
-  data.videos.forEach(v => {
-    const card = el("div", "card");
-    const row = el("div", "vid");
-    row.append(el("div", "url", `${v.video_id}  ·  ${(v.size / 1e6).toFixed(1)} MB  ·  ${new Date(v.time * 1000).toLocaleString("vi-VN")}`));
-    const open = el("button", "ghost", "Xem"); open.onclick = () => { open.replaceWith(playerFor(v.video_id)); };
-    row.append(open); card.append(row); list.append(card);
-  });
+  // Jobs and videos are drawn separately, so a busy job log never rebuilds an open player.
+  const jobsKey = JSON.stringify(data.jobs), videosKey = JSON.stringify(data.videos);
+  if (jobsKey !== lastJobs) {
+    lastJobs = jobsKey;
+    const jobs = $("jobs"); jobs.replaceChildren();
+    if (!data.jobs.length) jobs.append(el("p", "note", "Chưa có link nào."));
+    [...data.jobs].reverse().forEach(j => jobs.append(renderJob(j)));
+  }
+  if (videosKey !== lastVideos) {
+    lastVideos = videosKey;
+    const list = $("videos"); list.replaceChildren();
+    if (!data.videos.length) list.append(el("p", "note", "Chưa có video nào."));
+    data.videos.forEach(v => {
+      const card = el("div", "card");
+      const row = el("div", "vid");
+      row.append(el("div", "url", `${v.video_id}  ·  ${(v.size / 1e6).toFixed(1)} MB  ·  ${new Date(v.time * 1000).toLocaleString("vi-VN")}`));
+      const open = el("button", "ghost", "Xem"); open.onclick = () => { open.replaceWith(playerFor(v.video_id)); };
+      row.append(open); card.append(row); list.append(card);
+    });
+  }
 }
 refresh(); setInterval(refresh, 2000);
 </script>
