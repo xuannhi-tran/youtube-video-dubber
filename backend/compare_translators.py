@@ -95,7 +95,7 @@ def parse_args():
     parser.add_argument("job", help="video id, i.e. the folder name inside dub_jobs_output")
     parser.add_argument("--chunk", type=int, default=DEFAULT_CHUNK, help="1-based chunk number")
     parser.add_argument("--models", help="comma-separated model ids (default: gpt-oss-120b, qwen3.8-27b, gpt-oss-20b)")
-    parser.add_argument("--provider", choices=["groq", "gemini"], default="groq")
+    parser.add_argument("--provider", choices=["groq", "gemini", "ollama", "lmstudio"], default="groq")
     parser.add_argument("--max-tokens", type=int, help="cap on each answer's length (sets LLM_MAX_TOKENS)")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
@@ -115,6 +115,8 @@ def main():
     # Both settings must be in place before pipeline and llm are imported.
     os.environ["DUB_WORKDIR"] = str(job)
     os.environ["LLM_PROVIDER"] = args.provider
+    os.environ.pop("TRANSLATE_LLM_PROVIDER", None)  # --provider wins over .env
+    os.environ.pop("TRANSLATE_LLM_MODEL", None)
     if args.max_tokens:
         os.environ["LLM_MAX_TOKENS"] = str(args.max_tokens)
     import llm

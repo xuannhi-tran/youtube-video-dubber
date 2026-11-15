@@ -168,10 +168,15 @@ def preflight():
         problems.append(f"Python package missing: pip install {package}")
     if shutil.which("ffmpeg") is None:
         problems.append("ffmpeg was not found on PATH")
-    try:
-        llm.settings()
-    except (RuntimeError, ValueError) as error:
-        problems.append(f"{error} (backend/.env)")
+    for role in ("translate", "fit"):
+        try:
+            llm.settings(role=role)
+        except (RuntimeError, ValueError) as error:
+            problems.append(f"{error} (backend/.env)")
+            continue
+        problem = llm.check_local_server(role)
+        if problem:
+            problems.append(problem)
     if problems:
         raise SystemExit("Cannot start:\n- " + "\n- ".join(problems))
 

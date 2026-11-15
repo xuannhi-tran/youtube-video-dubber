@@ -424,8 +424,8 @@ class Speech:
         record = self.records[block_id]
         try:
             text, status = future.result()
-        except llm.QuotaExhausted as error:
-            print(f"LLM quota reached ({error}). The remaining blocks keep their text; "
+        except (llm.QuotaExhausted, llm.LLMError) as error:
+            print(f"LLM stopped ({error}). The remaining blocks keep their text; "
                   "too-long ones are sped up a little more when assembled.", flush=True)
             self.llm_off = True
             text, status = None, "still_over_budget"
@@ -553,7 +553,7 @@ def parse_args():
 def main():
     run_local_checks()
     args = parse_args()
-    print(f"Model: {MODEL} | Voice: {VOICE} | LLM: {llm.describe()}")
+    print(f"Model: {MODEL} | Voice: {VOICE} | LLM (shorten): {llm.describe(role="fit")}")
     Speech(args.follow, args.target, args.fresh).run()
 
 

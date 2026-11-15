@@ -1,7 +1,7 @@
 """Fit Vietnamese dub blocks to their time slots by word budget.
 
 Default is a DRY RUN with no API calls. Pass --apply to rewrite over-budget
-blocks with the LLM from llm.py (text only). dub_blocks.json is never modified.
+blocks with the LLM from llm.py (text only; FIT_LLM_PROVIDER / FIT_LLM_MODEL pick it). dub_blocks.json is never modified.
 """
 
 import argparse
@@ -119,8 +119,14 @@ def measured_budget(words, ratio, target=TARGET):
 
 
 def clean_rewrite(text):
-    text = (text or "").strip()
+    """Only the rewritten sentence: small local models add preambles, labels and thinking."""
+    text = llm.strip_thinking(text)
     text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text).strip()
+    text = re.sub(r"^(?:[^\n]{0,40}?(?:viết lại|bản rút gọn|rewritten|kết quả|here is)[^\n]{0,40}:\s*\n+)", "",
+                  text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*(?:[-*]\s+|(?:vietnamese|tiếng việt|rewritten text|bản viết lại)\s*:\s*)", "",
+                  text, flags=re.IGNORECASE)
+    text = " ".join(text.split())  # one line: a voice-over has no line breaks
     return text.strip("\"'“”‘’«» \n")
 
 
@@ -192,7 +198,7 @@ Current Vietnamese ({word_count(block["translated_text"])} words):
 
 
 def rewrite_once(block, limit):
-    return clean_rewrite(llm.generate(build_prompt(block, limit)))
+    return clean_rewrite(llm.generate(build_prompt(block, limit), role="fit"))
 
 
 def fit_block(block, budget):
@@ -278,8 +284,8 @@ def apply_fits(rows):
                 print(f"[{block['block_id']:02d}] {words} -> <= {budget} words...", flush=True)
                 try:
                     text, status = fit_block(block, budget)
-                except llm.QuotaExhausted as error:
-                    print(f"Quota reached ({error}). Stopping; remaining blocks keep original text.")
+                except (llm.QuotaExhausted, llm.LLMError) as error:
+                    print(f"LLM stopped ({error}). Stopping; remaining blocks keep original text.")
                     stopped = True
                     text = None
                 if text:
@@ -354,6 +360,9 @@ def run_local_checks():
     assert clean_rewrite('  "Xin chào."  ') == "Xin chào."
     assert clean_rewrite("```\nXin chào\n```") == "Xin chào"
     assert clean_rewrite(None) == ""
+    assert clean_rewrite("<think>đếm từ...</think>\nXin chào bạn.") == "Xin chào bạn."
+    assert clean_rewrite("Đây là bản viết lại:\n\nXin chào bạn.") == "Xin chào bạn."
+    assert clean_rewrite("Vietnamese: Xin chào\nbạn.") == "Xin chào bạn."
     assert within_budget("a b c", 3) and not within_budget("a b c d", 3)
     assert not within_budget("", 3)
     assert block_status(5, 5) == "unchanged" and block_status(6, 5) == "needs_rewrite"
@@ -398,6 +407,8 @@ def main():
     if fit_wps:
         print(f"For comparison, median over FIT+SPEED_UP only: {fit_wps:.2f}")
     print(f"TARGET: {args.target}")
+    if apply:
+        print(f"Rewriting with {llm.describe(role='fit')}")
     if selected is not None:
         print(f"Blocks: {args.blocks} ({len(blocks)} selected; only these are written)")
 
