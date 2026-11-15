@@ -1,98 +1,141 @@
 # YouTube Video Dubber (Chinese → Vietnamese)
 
-A personal prototype that dubs a Chinese video into Vietnamese. I built it because I wanted to watch Chinese knowledge videos without reading subtitles the whole time.
+A personal tool that dubs a Chinese YouTube video into Vietnamese. You give it a link and get back an MP4 with a Vietnamese voice-over. I built it because I wanted to watch Chinese knowledge videos without reading subtitles the whole time.
 
-It's an offline pipeline, not real-time (the repo name says "live", but it isn't). You give it a video, wait a few minutes, and get back an MP4 with a Vietnamese voice track.
+It is an offline pipeline, not real-time (the repo name says "live", but it isn't). Everything runs on your own computer except the translation, which can use Groq, Gemini or a local model (Ollama / LM Studio).
 
-**Status:** works end to end on a 72-second demo clip. It has not been tested on long videos or other languages.
+**Status:** works end to end on real videos (Groq, and a 2-minute clip with a local Ollama model). It has not been tested on other languages, on long videos with a local model, or on anything but Windows. Translation quality with a 7-8B local model is clearly below Groq's `gpt-oss-120b`.
 
-## How it works
-
-```
-video -> transcribe -> translate -> group into dub blocks -> TTS -> fit to timing -> assemble track -> mux into video
-```
-
-| Stage                  | Script                               | What it does                                                                                                                                                   |
-| ---------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Transcribe + translate | `backend/pipeline.py`                | faster-whisper (large-v3) transcribes the Chinese speech. Gemini translates it in ~20s context windows. Terms come from `glossary.py` so they stay consistent. |
-| Group                  | `backend/dub_block_builder.py`       | Merges segments into blocks of roughly 4-10s, cutting at sentence boundaries.                                                                                  |
-| TTS benchmark          | `backend/test_block_tts_duration.py` | Generates speech for each block with Gemini TTS and measures how long it takes compared with the original time slot. Caches audio by text hash.                |
-| Silence analysis       | `backend/analyze_tts_silence.py`     | Measures leading/trailing silence in each clip.                                                                                                                |
-| Fit                    | `backend/fit_blocks.py`              | Rewrites translations that are too long for their slot, using a word budget based on measured timings. Dry run by default.                                     |
-| Assemble               | `backend/assemble_dub.py`            | Trims silence, speeds clips up slightly (capped), and places them on the original timeline.                                                                    |
-| Mux                    | `backend/mux_dub.py`                 | Mixes the dub into the video with ffmpeg.                                                                                                                      |
-
-## Why the "fit" step exists
-
-Vietnamese speech tends to run longer than Chinese in the same time slot. On the demo clip, the first translation overran its slots by 35% on average, so the dub would drift out of sync.
-
-Two things helped:
-
-- **Shorter rewrites.** A word budget per block (calculated from the measured TTS timings) is given to Gemini, which rewrites only the blocks that are too long.
-- **Silence trimming and a capped speed-up** (1.1x base, 1.3x max).
-
-Results on the demo clip (13 blocks, one video, Gemini voice "Charon"):
-
-|                   | FIT / SPEED_UP / TOO_LONG | Average ratio (TTS length / slot) |
-| ----------------- | ------------------------- | --------------------------------- |
-| First translation | 1 / 4 / 8                 | 1.35                              |
-| After rewriting   | 1 / 7 / 5                 | 1.18                              |
-
-After trimming and speed-up, 1 of 13 blocks hit the speed cap, the largest drift was 0.09s, and the final drift was 0.00s (track length 71.86s vs 71.96s original).
-
-This is a small sample. I wouldn't expect the same numbers on a different video or voice.
-
-## Setup
-
-You need Python 3.10+, ffmpeg and ffprobe on your PATH, a Gemini API key, and a CUDA GPU (`pipeline.py` runs Whisper on `cuda`; change `device` in the script if you don't have one).
+## Quick start
 
 ```
 cd backend
 python -m venv .venv
 .venv\Scripts\activate
-pip install faster-whisper google-genai python-dotenv
+pip install yt-dlp faster-whisper vieneu httpx python-dotenv numpy
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12     # CUDA libraries for Whisper (see Setup)
 ```
 
-Create `backend/.env`:
+Create `backend/.env` with a key (see [Settings](#settings)), then:
 
 ```
-GEMINI_API_KEY=your_key_here
+python dub.py "https://www.youtube.com/watch?v=VIDEO_ID" --max-seconds 120   # try the first 2 minutes
+python dub.py "https://www.youtube.com/watch?v=VIDEO_ID"                      # the whole video
 ```
 
-`.env`, audio, video and generated output are git-ignored. You supply your own input video.
+The result is `backend/dub_jobs_output/<video id>/dub_output/dubbed.mp4`.
 
-## Running it
+## How it works
 
-From `backend/`. Put the audio at `xiaowulang_original.mp3` and the video at `xiaowulang_original.mp4` (the filename is currently hardcoded in `pipeline.py`, and only the first 90 seconds are processed).
+`dub.py` runs five stages for one video. Each video gets its own folder, `backend/dub_jobs_output/<video id>/`, so jobs never mix. Finished stages are skipped on a re-run, so after an interruption (a quota limit, a crash, Ctrl+C) you run the same command and it continues.
 
 ```
-python pipeline.py
-python dub_block_builder.py
-python test_block_tts_duration.py
-python fit_blocks.py --target 1.2 --blocks 1-13            # dry run, no API calls
-python fit_blocks.py --target 1.2 --blocks 1-13 --apply    # rewrites long blocks with Gemini
-python test_block_tts_duration.py dub_blocks_fitted.json
-python assemble_dub.py --original xiaowulang_original.mp3
-python mux_dub.py --video xiaowulang_original.mp4
+download -> transcribe + translate  ─┐
+                                      ├─ (at the same time) -> assemble -> mux
+            speech (shorten + TTS)  ─┘
 ```
 
-The output goes to `backend/dub_output/`: the dub track, a preview mix, and `dubbed.mp4`.
+| Stage | Script | What it does |
+| --- | --- | --- |
+| 1. download | `dub.py` | `yt-dlp` downloads the video (up to 720p by default) to `source.mp4`; `ffmpeg` extracts 16 kHz mono `source.wav`. |
+| 2. transcribe + translate | `pipeline.py` | faster-whisper (`large-v3`, on the GPU) transcribes the Chinese speech. The segments are grouped into windows of about 20 seconds and the LLM translates each window into spoken Vietnamese, with the previous 8 translated segments as context. Every translated window is saved, so an interrupted run does not redo it. Glossary terms (`glossary.py`) are given to both Whisper (as hotwords) and the LLM. |
+| 3. speech | `speech.py` | Starts while translation is still running (`--follow`) and reads blocks as soon as they are translated. Segments are first merged into blocks of about 4-10 s (`dub_block_builder.py`). If a block will not fit its time slot, the LLM shortens it **before** it is read (`fit_blocks.py`); then VieNeu v3 Turbo (voice `xuan_vinh`, runs locally on CPU via ONNX) reads it and the clip length is measured; a clip that is still too long is shortened once more and read again. The LLM and VieNeu work in parallel, one thread each. |
+| 4. assemble | `assemble_dub.py` | Places the clips on the original timeline into `dub_output/dub_track.wav`: trims silence, keeps at least 0.25 s between clips, lets the dub drift up to 3 s from the original, reads slightly faster (up to 1.1x) when more than 1.5 s behind and up to `--max-speed` (1.3x) only to avoid falling more than 3 s behind, and brings every clip to -20 dBFS. |
+| 5. mux | `mux_dub.py` | Mixes the dub track with the original audio (original at volume 0.12 by default) into `dub_output/dubbed.mp4`. If the video runs longer than the dub, the original audio returns to full volume after the dub ends. |
+
+Each script also has its own checks that run when it starts (`run_local_checks`), and most can be run alone from inside a job folder by setting `DUB_WORKDIR` to the job folder.
+
+### Redoing a stage
+
+```
+python dub.py URL --redo transcribe      # translate again (Whisper's saved transcript is reused)
+python dub.py URL --redo speech          # forget earlier rewrites and read again
+python dub.py URL --redo mux             # only the last stage
+python dub.py URL --original-volume 0.04 # remix with quieter original voice (0 drops it); redoes only the mux
+python dub.py URL --glossary-only        # create the job folder and glossary.json, then stop
+```
+
+`--redo X` redoes stage X and everything after it. Changing `--max-seconds` redoes everything after the download, because the transcript depends on it.
+
+### Files in a job folder
+
+| File | What it is |
+| --- | --- |
+| `source.mp4`, `source.wav` | Downloaded video and its audio. |
+| `glossary.json` | Terms to keep fixed (see [Glossary](#glossary)). Empty by default. |
+| `transcript_raw.json` | Whisper output (reused while the audio and glossary hotwords are unchanged). |
+| `translate_cache.json` | Every translated window, so quota stops cost nothing. |
+| `translated_partial.json`, `translated_segments.json` | Growing / final translation. |
+| `dub_blocks.json`, `dub_blocks_fitted.json` | Blocks before and after shortening. |
+| `block_tts_output/`, `block_tts_duration_results_fitted.json` | The clips and their measured lengths. |
+| `speech_state.json`, `dub_state.json` | Progress, so every stage can resume. |
+| `dub_output/` | `dub_track.wav`, per-block files, and `dubbed.mp4`. |
+
+Everything under `*_output/`, plus `.env`, audio and video, is git-ignored.
+
+## Setup
+
+You need:
+
+- **Python 3.10+**, **ffmpeg** and **ffprobe** on your PATH.
+- A **CUDA GPU** for Whisper (`pipeline.py` loads `large-v3` on `cuda` in float16; the first run downloads about 3 GB). On Windows, `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` from pip provide the libraries, and `cuda_dlls.py` makes them visible to Windows before Whisper loads.
+- **VieNeu** for speech. It runs on the CPU, so there is no TTS quota, but it is slow. `hf_cache_fix.py` works around ONNX Runtime refusing Hugging Face cache symlinks.
+- An **LLM** for translation and shortening: a Groq or Gemini key, or a local Ollama / LM Studio model.
+
+`dub.py` checks all of this (packages, ffmpeg, LLM key, local server and model) before it starts, and lists what is missing.
+
+### Settings
+
+Put them in `backend/.env`. Only a key is required.
+
+```
+GROQ_API_KEY=...          # default provider when this is set
+GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
+```
+
+| Variable | Meaning |
+| --- | --- |
+| `LLM_PROVIDER` | `groq` (default), `gemini`, `ollama` or `lmstudio`. |
+| `LLM_MODEL` | Model name; each provider has a default (`openai/gpt-oss-120b` for Groq, `qwen3:8b` for Ollama). |
+| `TRANSLATE_LLM_PROVIDER`, `TRANSLATE_LLM_MODEL` | Override the two above for translation only. |
+| `FIT_LLM_PROVIDER`, `FIT_LLM_MODEL` | Override them for shortening only (`fit_blocks.py` and `speech.py`). |
+| `LLM_MAX_TOKENS` | Cap on the answer length (some Groq models allow very little per minute). |
+| `GROQ_API_URL` | Any OpenAI-compatible chat endpoint instead of Groq's. |
+| `LOCAL_LLM_URL`, `LOCAL_LLM_TIMEOUT`, `LOCAL_LLM_THINK` | Local server settings, see below. |
+
+`python llm.py` checks the logic and makes one real call for translation and one for shortening, which is the quickest way to test your settings. `python llm.py --list` lists the models your Groq key can use.
+
+### Glossary
+
+`dub.py` creates an empty `glossary.json` (a JSON list of strings) in each job folder. Edit it **before** the transcribe stage to pin names and terms:
+
+```json
+["khí chất", "tạp chí Time", "MBTI", "Fe (cảm xúc hướng ngoại)"]
+```
+
+An entry may carry its meaning in parentheses: the LLM explains it once in words and afterwards uses only the term. Latin-script terms (MBTI, Fe...) are also given to Whisper as hotwords. If a job has no `glossary.json`, a default list of Bible-related terms from the first demo video is used. Changing the glossary changes the translation cache keys, so those windows are translated again.
+
+### Pronunciation
+
+An optional `pronunciations.json` (in `backend/`, or in a job folder to override it) maps text to how it should sound, e.g. `{"ENFJ": "e n f j"}`. It is applied just before reading.
 
 ## Using a local LLM (Ollama) instead of Groq
 
-Groq's free tier has a daily token limit. Translation (`pipeline.py`) and shortening (`fit_blocks.py`, and the LLM worker in `speech.py`) can instead use a model on your own computer through Ollama or LM Studio. Local models have no quota and no key. Nothing changes unless you set the variables below: the default is still Groq.
+Groq's free tier has a daily token limit. Translation and shortening can instead use a model on your own computer through Ollama or LM Studio. Local models have no quota and no key. Nothing changes unless you set the variables below: the default is still Groq.
 
-**1. Install Ollama and pull a model** (Windows: download the installer from https://ollama.com/download, then in a terminal):
+**1. Install Ollama and pull a model** (Windows: installer from https://ollama.com/download, then in a terminal):
 
 ```
 ollama pull qwen3:8b             # recommended, about 5 GB
-ollama pull qwen2.5:7b-instruct  # alternative, a bit faster, less careful with long context
+ollama pull qwen2.5:7b-instruct  # alternative
 ollama list                      # check it is there
 ```
 
-Both are Q4 builds that fit an 8 GB GPU. Whisper large-v3 also uses the GPU, but only at the start, and Ollama unloads its model after a few idle minutes, so the stages mostly take turns. If you run out of VRAM, set `OLLAMA_KEEP_ALIVE=0` or pick a smaller model such as `qwen3:4b`.
+To keep models on another drive, set `OLLAMA_MODELS` (e.g. `setx OLLAMA_MODELS "D:\ollama\models"`), restart Ollama and open a new terminal before pulling.
 
-**2. Choose it in `backend/.env`** (keep your keys, add the lines you need):
+Both are Q4 builds that fit an 8 GB GPU. Whisper also uses the GPU, but only at the start, and Ollama unloads its model after a few idle minutes, so the stages mostly take turns. If you run out of VRAM, pick a smaller model such as `qwen3:4b`.
+
+**2. Choose it in `backend/.env`:**
 
 ```
 # everything local
@@ -102,48 +145,52 @@ LLM_MODEL=qwen3:8b
 # or mix: translate with Groq, shorten locally (shortening is many short calls)
 FIT_LLM_PROVIDER=ollama
 FIT_LLM_MODEL=qwen3:8b
-
-# or the other way round
-TRANSLATE_LLM_PROVIDER=ollama
-TRANSLATE_LLM_MODEL=qwen2.5:7b-instruct
 ```
-
-`TRANSLATE_LLM_*` only affects translation, `FIT_LLM_*` only shortening, and `LLM_*` is the fallback for both. Setting a provider without a model uses that provider's default (`qwen3:8b` for Ollama).
 
 | Variable | Meaning |
 | --- | --- |
-| `LLM_PROVIDER` | `groq`, `gemini`, `ollama` or `lmstudio` |
-| `LOCAL_LLM_URL` | default `http://localhost:11434/v1` (Ollama) or `http://localhost:1234/v1` (LM Studio) |
-| `LOCAL_LLM_TIMEOUT` | seconds to wait for one answer (default 600) |
-| `LOCAL_LLM_THINK` | `1` lets Qwen3 reason before answering; off by default because it is slow |
+| `LOCAL_LLM_URL` | Default `http://localhost:11434/v1` (Ollama) or `http://localhost:1234/v1` (LM Studio). |
+| `LOCAL_LLM_TIMEOUT` | Seconds to wait for one answer (default 600). |
+| `LOCAL_LLM_THINK` | `1` lets Qwen3 reason before answering; off by default because it is slow. |
 
-LM Studio: load a model, start the server in the Developer tab, set `LLM_PROVIDER=lmstudio` and `LLM_MODEL` to the model identifier shown there.
+LM Studio: load a model, start the server in the Developer tab, set `LLM_PROVIDER=lmstudio` and `LLM_MODEL` to the identifier shown there.
 
 **3. Run it**
 
 ```
-python llm.py                                   # checks the logic and makes one real call per job
-python dub.py "https://www.youtube.com/watch?v=..."
-python dub.py URL --redo transcribe             # translate everything again with the current model
-python compare_translators.py 2ZA7QtaFo4Q --provider ollama --models qwen3:8b,qwen2.5:7b-instruct
+python llm.py
+python dub.py "https://www.youtube.com/watch?v=VIDEO_ID" --max-seconds 120
+python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5:7b-instruct
 ```
-
-`dub.py` checks before starting that Ollama is running and that the model has been pulled.
 
 **What to expect from 7-8B models**
 
-- Their JSON is less reliable. The parser accepts code fences, `<think>` blocks, chatter around the array, trailing commas and an answer cut off before `]`. A bad answer is asked again with a note on what was wrong, and a chunk that still fails is split in two halves. If it still fails, the run stops and the finished chunks are kept.
-- Translation quality is lower than gpt-oss-120b, especially for names and terms. Put them in the job's `glossary.json`.
-- Chunks already translated by another model are kept when you switch (same transcript, glossary and prompt version). Add `--retranslate` to `pipeline.py` to translate them again.
+- Their JSON is less reliable. The parser accepts code fences, `<think>` blocks, chatter around the array, trailing commas and an answer cut off before `]`. A bad answer is asked again with a note on what was wrong, and a window that still fails is split in two halves. If it still fails, the run stops and the finished windows are kept.
+- A translation that still contains Chinese characters is treated as wrong and asked again (the voice cannot read them); a single segment that still has some after all retries has those characters removed.
+- Windows already translated by another model are kept when you switch (same transcript, glossary and prompt version). `pipeline.py --retranslate` translates them again with the current model.
+- Names and terms are weaker than with Groq: use the glossary. Speech-recognition mistakes in names are sometimes translated literally.
+
+## Other scripts
+
+| Script | Use |
+| --- | --- |
+| `compare_translators.py JOB_ID` | Translates the same window of a job with several models, side by side, into `translator_compare_output/`. |
+| `compare_voices.py` | Reads a sample with every VieNeu preset voice and writes an `index.html` to listen and compare. |
+| `tts_speed_test.py` | Measures VieNeu speed on CPU vs GPU. |
+| `fit_blocks.py` | The shortening step on its own. Dry run by default; `--apply` calls the LLM. `speech.py` uses it too. |
+| `test_block_tts_duration.py`, `test_tts_duration.py`, `analyze_tts_silence.py` | Benchmark and silence analysis of clips; `speech.py` reuses their helpers. |
+| `test_tts.py`, `test_translate.py`, `test_elevenlabs.py`, `test_transcribe.py` | Early prototypes (Gemini, ElevenLabs, Whisper). Not part of the pipeline; some need extra packages (`google-genai`, `elevenlabs`) and keys. |
 
 ## Limitations
 
-- One demo clip, hardcoded filenames, first 90 seconds only.
-- Free-tier Gemini quotas limit how much TTS you can generate per day. The scripts cache audio and stop cleanly on a daily quota error, and you can resume the next day.
-- The word budget depends on the voice and the speaking rate I measured, so it needs recalibrating for another voice.
-- Pronunciation and tone of the TTS voice are as good as Gemini's, and I haven't tuned them.
-- Some wording differs between blocks (for example, "Kitô giáo" vs "Cơ Đốc giáo"). The glossary fixes this for new translations but I haven't regenerated the old ones.
+- Chinese → Vietnamese only, one voice (`xuan_vinh`).
+- The original audio is only turned down, not removed: voices are not separated from music. Use `--original-volume` to taste (0 drops it).
+- VieNeu on CPU is slow, so a long video takes a long time to read. GPU speech is not implemented.
+- Whisper needs a CUDA GPU. Without one, change `device` in `pipeline.py` (slower).
+- Vietnamese is longer than Chinese in the same time, so some blocks are shortened by the LLM, which can lose detail; some blocks over about 12 s have no sentence break to split at. Timing is kept by letting the dub drift (up to 3 s) and by small speed-ups rather than exact sync.
+- The Groq free tier stops at its daily limit; the run keeps what it has and continues when you run the same command later.
+- Quality depends on the LLM and on speech-recognition errors. Check the result before sharing it.
 
 ## Notes on content
 
-The demo uses a video by someone else for testing only.
+Dub only videos you have the right to use. The demo videos used for testing belong to someone else and are not included.
