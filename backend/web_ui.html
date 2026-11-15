@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube Dubber</title>
+<style>
+:root { --bg:#f6f7f9; --card:#fff; --text:#1b1f24; --muted:#657080; --line:#dfe3e8; --accent:#2563eb; --ok:#15803d; --bad:#b91c1c; --code:#f0f2f5; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#14171c; --card:#1d2128; --text:#e8ebef; --muted:#9aa5b4; --line:#2c323b; --accent:#60a5fa; --ok:#4ade80; --bad:#f87171; --code:#12151a; }
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+main { max-width:860px; margin:0 auto; padding:24px 16px 48px; }
+h1 { font-size:22px; margin:0 0 4px; }
+h2 { font-size:16px; margin:28px 0 10px; }
+.sub { color:var(--muted); margin:0 0 18px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:12px; }
+form .row { display:flex; gap:8px; }
+input[type=text], input[type=number] { width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font:inherit; }
+button { padding:9px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; white-space:nowrap; }
+button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); padding:4px 10px; font-size:13px; }
+button:disabled { opacity:.5; cursor:default; }
+.opts { display:flex; flex-wrap:wrap; gap:8px 18px; margin-top:12px; align-items:center; color:var(--muted); font-size:14px; }
+.opts label { display:flex; gap:6px; align-items:center; }
+.opts input[type=number] { width:80px; padding:5px 8px; }
+.err { color:var(--bad); margin-top:8px; min-height:1.2em; font-size:14px; }
+.head { display:flex; justify-content:space-between; gap:10px; align-items:center; }
+.url { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+.badge { font-size:12px; padding:2px 8px; border-radius:99px; border:1px solid var(--line); color:var(--muted); white-space:nowrap; }
+.badge.done { color:var(--ok); } .badge.failed { color:var(--bad); } .badge.running { color:var(--accent); }
+.steps { display:flex; gap:6px; margin:10px 0 4px; }
+.steps span { flex:1; height:6px; border-radius:3px; background:var(--line); }
+.steps span.on { background:var(--accent); } .steps span.now { background:var(--accent); opacity:.55; }
+.note { color:var(--muted); font-size:13px; }
+pre { background:var(--code); border-radius:8px; padding:8px 10px; margin:8px 0 0; font:12px/1.45 ui-monospace,Consolas,monospace; max-height:150px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+video { width:100%; max-height:420px; background:#000; border-radius:8px; margin-top:8px; }
+a { color:var(--accent); }
+.vid { display:flex; justify-content:space-between; gap:10px; align-items:center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>YouTube Dubber</h1>
+  <p class="sub">Dán link video tiếng Trung, trang này tự dịch, lồng tiếng Việt và xuất video hoàn chỉnh.</p>
+
+  <form id="form" class="card">
+    <div class="row">
+      <input id="url" type="text" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" required>
+      <button id="go" type="submit">Làm video</button>
+    </div>
+    <div class="opts">
+      <label><input id="subs" type="checkbox"> Thêm phụ đề tiếng Việt (dải đen dưới video)</label>
+      <label>Âm gốc <input id="vol" type="number" min="0" max="1" step="0.01" placeholder="0.02"></label>
+      <label>Chỉ thử <input id="secs" type="number" min="1" step="1" placeholder="hết"> giây đầu</label>
+    </div>
+    <div id="err" class="err"></div>
+  </form>
+
+  <h2>Đang làm</h2>
+  <div id="jobs"><p class="note">Chưa có link nào.</p></div>
+
+  <h2>Video đã xong</h2>
+  <div id="videos"><p class="note">Chưa có video nào.</p></div>
+</main>
+<script>
+const STEPS = ["Tải video", "Dịch", "Đọc giọng", "Ghép nhịp", "Xuất video"];
+const STATUS = {waiting:"Đang chờ", running:"Đang chạy", done:"Xong", failed:"Lỗi", cancelled:"Đã hủy"};
+const $ = id => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+
+$("form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  $("err").textContent = "";
+  const body = {url: $("url").value, subs: $("subs").checked, original_volume: $("vol").value, max_seconds: $("secs").value};
+  const res = await fetch("/api/jobs", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  const data = await res.json();
+  if (!res.ok) { $("err").textContent = data.error || "Lỗi"; return; }
+  $("url").value = "";
+  refresh();
+});
+
+async function cancel(id) {
+  await fetch(`/api/jobs/${id}/cancel`, {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+  refresh();
+}
+
+function renderJob(job) {
+  const card = el("div", "card");
+  const head = el("div", "head");
+  head.append(el("div", "url", job.url), el("span", "badge " + job.status, STATUS[job.status]));
+  card.append(head);
+  if (job.status === "running" || job.status === "done") {
+    const bar = el("div", "steps");
+    STEPS.forEach((_, i) => bar.append(el("span", job.status === "done" || i + 1 < job.stage ? "on" : (i + 1 === job.stage ? "now" : ""))));
+    card.append(bar);
+    const label = job.status === "done" ? "Xong tất cả các bước" : (job.stage ? `Bước ${job.stage}/5: ${STEPS[job.stage - 1]}` : "Đang khởi động...");
+    card.append(el("div", "note", label));
+  }
+  if (job.status === "failed") {
+    card.append(el("div", "note", job.error));
+    card.append(el("div", "note", "Chạy lại cùng link: phần đã xong được giữ lại, chỉ làm tiếp chỗ dở."));
+  }
+  if (job.log.length && job.status !== "waiting") {
+    const log = el("pre", "", job.log.join("\n"));
+    card.append(log);
+    log.scrollTop = log.scrollHeight;
+  }
+  if (job.status === "waiting" || job.status === "running") {
+    const b = el("button", "ghost", "Hủy"); b.onclick = () => cancel(job.id);
+    card.append(el("div", "", "")); card.lastChild.style.marginTop = "8px"; card.lastChild.append(b);
+  }
+  if (job.status === "done") card.append(el("div", "note", "Video nằm ở mục “Video đã xong” bên dưới."));
+  return card;
+}
+
+function playerFor(id) {
+  const wrap = el("div");
+  const v = document.createElement("video");
+  v.controls = true; v.preload = "metadata"; v.src = "/video/" + encodeURIComponent(id);
+  const link = el("a", "", "Tải về dubbed.mp4"); link.href = "/video/" + encodeURIComponent(id) + "?download=1";
+  wrap.append(v, el("div", "note", ""));
+  wrap.lastChild.append(link);
+  return wrap;
+}
+
+let lastKey = "";
+async function refresh() {
+  let data;
+  try { data = await (await fetch("/api/state")).json(); } catch { return; }
+  const key = JSON.stringify(data);
+  if (key === lastKey) return;
+  if ([...document.querySelectorAll("video")].some(v => !v.paused)) return;  // do not cut a playing video
+  lastKey = key;
+  const jobs = $("jobs"); jobs.replaceChildren();
+  if (!data.jobs.length) jobs.append(el("p", "note", "Chưa có link nào."));
+  [...data.jobs].reverse().forEach(j => jobs.append(renderJob(j)));
+  const list = $("videos"); list.replaceChildren();
+  if (!data.videos.length) list.append(el("p", "note", "Chưa có video nào."));
+  data.videos.forEach(v => {
+    const card = el("div", "card");
+    const row = el("div", "vid");
+    row.append(el("div", "url", `${v.video_id}  ·  ${(v.size / 1e6).toFixed(1)} MB  ·  ${new Date(v.time * 1000).toLocaleString("vi-VN")}`));
+    const open = el("button", "ghost", "Xem"); open.onclick = () => { open.replaceWith(playerFor(v.video_id)); };
+    row.append(open); card.append(row); list.append(card);
+  });
+}
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>
