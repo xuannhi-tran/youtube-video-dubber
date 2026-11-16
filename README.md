@@ -323,7 +323,6 @@ python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5
 | `tts_speed_test.py` | Measures VieNeu speed on CPU vs GPU. |
 | `fit_blocks.py` | The shortening step on its own. Dry run by default; `--apply` calls the LLM. `speech.py` uses it too. |
 | `test_block_tts_duration.py`, `test_tts_duration.py`, `analyze_tts_silence.py` | Benchmark and silence analysis of clips; `speech.py` reuses their helpers. |
-| `test_tts.py`, `test_translate.py`, `test_elevenlabs.py`, `test_transcribe.py` | Early prototypes (Gemini, ElevenLabs, Whisper). Not part of the pipeline; some need extra packages (`google-genai`, `elevenlabs`) and keys. |
 
 ## Limitations
 

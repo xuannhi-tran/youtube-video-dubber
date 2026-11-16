@@ -18,6 +18,5 @@ block_tts_output*/
 backend/.env
 backend/jobs/
 backend/dub_jobs_output/
-backend/test_*.py
 *.log
 .DS_Store
