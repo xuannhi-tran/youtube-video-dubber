@@ -3,8 +3,9 @@
 For every dub block:
   1. predict how long it will sound (words per second, learned while running);
      if it will not fit its time slot, shorten it with the LLM *before* reading it;
-  2. read it with VieNeu and measure it;
-  3. if it is still too long, shorten it once more and read it again.
+  2. when a review model is configured, check shortened text against the Chinese;
+  3. read the final text with VieNeu and measure it;
+  4. if it is still too long, shorten it once more and read it again.
 
 The LLM and VieNeu work at the same time (one worker thread each), so a rewrite
 costs no waiting while other blocks are being read. With --follow, blocks are
@@ -58,6 +59,7 @@ PRONUNCIATION_FILES = [SCRIPT_DIR / "pronunciations.json", WORKDIR / "pronunciat
 DEFAULT_WORDS_PER_SECOND = 4.5  # measured on the first test video
 MIN_SAMPLES = 3                 # measured clips needed before trusting them
 MAX_REFITS = 1                  # extra rewrites after a clip measured too long
+POST_FIT_REVIEW_VERSION = 1     # raise to retry saved fitted blocks with a new review prompt
 POLL_SECONDS = 1.0
 
 
@@ -110,7 +112,8 @@ def words_per_second(samples, fallback):
 
 def new_record(text):
     """What speech_state.json keeps per block."""
-    return {"input": text, "text": text, "fitted": False, "refits": 0, "status": "unchanged"}
+    return {"input": text, "text": text, "fitted": False, "refits": 0,
+            "status": "unchanged", "post_fit_review_version": 0}
 
 
 def restore_record(saved, text):
@@ -241,6 +244,8 @@ class Speech:
         self.results = {}   # block_id -> result row of the latest clip
         self.complete = False
         self.waiting_shown = False
+        self.review_enabled = llm.role_configured("review")
+        self.review_off = False
 
         AUDIO_DIR.mkdir(parents=True, exist_ok=True)
         metadata = read_json(METADATA_FILE, {})
@@ -263,7 +268,7 @@ class Speech:
         self.narrator = None
         self.batch_size = BATCH  # blocks read in one pass (TTS_BATCH, default 1)
         self.busy = {"llm": 0.0, "tts": 0.0}
-        self.counts = {"rewrites": 0, "refits": 0, "clips": 0, "cached": 0}
+        self.counts = {"rewrites": 0, "refits": 0, "polishes": 0, "clips": 0, "cached": 0}
 
     # -- rate -------------------------------------------------
 
@@ -276,6 +281,12 @@ class Speech:
 
     def too_long(self, block_id):
         return fit.word_count(self.records[block_id]["text"]) > self.budget(block_id)
+
+    def needs_post_fit_review(self, record):
+        version = record.get("post_fit_review_version", 0)
+        version = version if isinstance(version, int) else 0
+        return (self.review_enabled and record["status"] in ("rewritten", "still_over_budget")
+                and version < POST_FIT_REVIEW_VERSION)
 
     # -- new blocks -------------------------------------------
 
@@ -313,7 +324,10 @@ class Speech:
             if not record["fitted"] and not self.too_long(block_id):
                 record["fitted"] = True  # fits already: no need to wait for the LLM
             if record["fitted"]:
-                heapq.heappush(self.tts_queue, block_id)
+                if self.needs_post_fit_review(record):
+                    heapq.heappush(self.llm_queue, (block_id, "polish"))
+                else:
+                    heapq.heappush(self.tts_queue, block_id)
             else:
                 # Checked again when its turn comes, with the rate known by then.
                 heapq.heappush(self.llm_queue, (block_id, "fit"))
@@ -346,15 +360,20 @@ class Speech:
                         record["status"] = "still_over_budget"
                     heapq.heappush(self.tts_queue, block_id)
                     continue
+            elif kind == "polish":
+                if self.review_off:
+                    heapq.heappush(self.tts_queue, block_id)
+                    continue
+                budget = self.budget(block_id)
             else:
                 budget = record["refit_budget"]
                 if self.llm_off:
                     self.finish_block(block_id)
                     continue
-            label = "shorten" if kind == "fit" else "shorten again"
+            label = {"fit": "shorten", "refit": "shorten again", "polish": "review fitted text"}[kind]
             print(f"[{block_id:03d}] {label}: {words} -> <= {budget} words", flush=True)
             request = {**block, "translated_text": record["text"]}
-            self.llm_future = llm_pool.submit(self.rewrite, request, budget)
+            self.llm_future = llm_pool.submit(self.rewrite, request, budget, kind)
             self.llm_future.job = (block_id, kind)
         self.save_state()
 
@@ -392,9 +411,11 @@ class Speech:
 
     # -- worker threads ---------------------------------------
 
-    def rewrite(self, block, budget):
+    def rewrite(self, block, budget, kind):
         started = time.perf_counter()
         try:
+            if kind == "polish":
+                return fit.review_fitted_block(block, budget), "polished"
             return fit.fit_block(block, budget)
         finally:
             self.busy["llm"] += time.perf_counter() - started
@@ -431,11 +452,27 @@ class Speech:
         record = self.records[block_id]
         try:
             text, status = future.result()
-        except (llm.QuotaExhausted, llm.LLMError) as error:
+        except (llm.QuotaExhausted, llm.LLMError, RuntimeError, ValueError) as error:
+            if kind != "polish" and not isinstance(error, (llm.QuotaExhausted, llm.LLMError)):
+                raise
+            if kind == "polish":
+                print(f"[{block_id:03d}] post-fit review failed ({error}); keeping fitted text", flush=True)
+                self.review_off = True
+                heapq.heappush(self.tts_queue, block_id)
+                self.save_state()
+                return
             print(f"LLM stopped ({error}). The remaining blocks keep their text; "
                   "too-long ones are sped up a little more when assembled.", flush=True)
             self.llm_off = True
             text, status = None, "still_over_budget"
+        if kind == "polish":
+            self.counts["polishes"] += 1
+            if text:
+                record["text"] = speakable(text, self.seen_asides)
+            record["post_fit_review_version"] = POST_FIT_REVIEW_VERSION
+            heapq.heappush(self.tts_queue, block_id)
+            self.save_state()
+            return
         if kind == "refit":
             record["refits"] += 1
             self.counts["refits"] += 1
@@ -446,7 +483,11 @@ class Speech:
         record["status"] = status
         record["fitted"] = True
         record.pop("refit_budget", None)
-        heapq.heappush(self.tts_queue, block_id)
+        record["post_fit_review_version"] = 0
+        if text and self.needs_post_fit_review(record):
+            heapq.heappush(self.llm_queue, (block_id, "polish"))
+        else:
+            heapq.heappush(self.tts_queue, block_id)
         self.save_state()
 
     def clip_done(self, block_id, text, audio_file, duration, fingerprint, cached):
@@ -536,6 +577,7 @@ class Speech:
               f"VieNeu busy {self.busy['tts'] / 60:.1f} min")
         print(f"Shortened: {self.counts['rewrites']} before reading, "
               f"{self.counts['refits']} again after measuring | LLM busy {self.busy['llm'] / 60:.1f} min")
+        print(f"Post-fit reviews: {self.counts['polishes']}")
         for classification in ("FIT", "SPEED_UP", "TOO_LONG"):
             print(f"{classification}: {sum(row['classification'] == classification for row in rows)}")
         print(f"Speech rate measured: {self.rate():.2f} words/s")
@@ -560,7 +602,14 @@ def parse_args():
 def main():
     run_local_checks()
     args = parse_args()
-    print(f"Model: {MODEL} | Voice: {VOICE} | Batch: {BATCH} | LLM (shorten): {llm.describe(role="fit")}")
+    reviewer = None
+    if llm.role_configured("review"):
+        try:
+            reviewer = llm.describe(role="review")
+        except (RuntimeError, ValueError) as error:
+            print(f"Post-fit review is misconfigured ({error}); continuing without it.", flush=True)
+    print(f"Model: {MODEL} | Voice: {VOICE} | Batch: {BATCH} | LLM (shorten): {llm.describe(role="fit")}" +
+          (f" | post-fit review: {reviewer}" if reviewer else ""))
     Speech(args.follow, args.target, args.fresh).run()
 
 
