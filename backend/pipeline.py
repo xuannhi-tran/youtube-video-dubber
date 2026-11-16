@@ -29,9 +29,9 @@ ANSWER_ATTEMPTS = 3  # fresh requests when the answer is not usable JSON
 MODELS_ENTRY = "_models"
 # Part of every cache key: raise it when the translation prompt changes, so
 # chunks translated with an older prompt are translated again.
-PROMPT_VERSION = 3
+PROMPT_VERSION = 4
 # Same for the review pass (see review_chunk).
-REVIEW_PROMPT_VERSION = 2
+REVIEW_PROMPT_VERSION = 3
 # A review that changes more lines than this share of a chunk (and more than 3) is rewriting rather
 # than correcting; it is still used, but the log says so (see review_warning).
 REVIEW_WARN_SHARE = 0.25
@@ -339,6 +339,10 @@ segments.
 How to translate:
 - First understand the whole passage, then translate it as fluent, natural
   spoken Vietnamese (not word-for-word, not subtitle style).
+- Read each complete Vietnamese sentence back as a native speaker would say it.
+  Remove duplicated meaning, repeated synonyms and stiff Chinese-derived phrasing;
+  for example, say "sâu thẳm trong lòng" once instead of combining it with
+  "trong tiềm thức" for the same idea.
 - Then split your Vietnamese back over the same segments, in order: each
   segment holds the Vietnamese for its part. Inside a sentence you may move a
   word or two across a segment boundary so the Vietnamese word order is natural.
@@ -350,7 +354,9 @@ How to translate:
   contain recognition errors: correct them only when the context clearly shows
   what was meant (a glossary term often is).
 - Do not invent facts when the transcript is uncertain.
-- Keep it concise: it will be spoken in the same time as the original.
+- Preserve the speaker's key information and use natural connecting words.
+  Do not make the Vietnamese abrupt just to shorten it; a later speech-fitting
+  step handles duration limits separately and may shorten lines if needed.
 - Never translate word for word. Spoken Chinese has structures that sound foreign in
   Vietnamese: "我们" in front of a name (我们天才尼采) is only familiar speech, so write
   "thiên tài Nietzsche", never "của chúng ta"; avoid chains of "của" ("thiên tài của
@@ -508,22 +514,28 @@ def build_review_prompt(chunk, draft):
         if glossary_lines else ""
     )
     return f"""
-You are the editor of a Chinese to Vietnamese video dub. Below are numbered lines:
+You are the Vietnamese-language editor of a Chinese to Vietnamese video dub. Below are numbered lines:
 the Chinese original, then "=>", then a Vietnamese draft that a voice-over will read.
 The lines are consecutive pieces of ONE passage of speech, so a sentence can run over several lines.
+Your main goal is idiomatic, fluent Vietnamese that sounds natural when spoken aloud.
+A draft can be understandable and still sound translated or awkward; correct those lines.
 
-The draft is usually good. Change a line ONLY when it has one of these clear errors:
+Change a line when it has one of these problems:
 - the meaning is wrong, missing or invented compared with the Chinese;
 - it reads like a word-for-word translation: 我们 + a name is just the name ("thiên tài
   Nietzsche", never "của chúng ta"), chains of "của", a Chinese word order;
+- it is noticeably unnatural in Vietnamese: awkward word order or word choice,
+  duplicated meaning, repeated synonyms, a stiff expression or a phrase a native
+  Vietnamese speaker would not use in conversation;
 - a SPECIFIC person (named, or clearly the same person as in the lines around it) is called
   "nó" or "anh ấy" where "ông", "bà", the name or "họ" is right (historical figures, thinkers
   and older people are "ông" or "bà");
 - it is said to the wrong person: who says what to whom must match the Chinese
   (the speaker "tôi", the audience "bạn"/"chúng ta", other people "họ");
 - a Chinese name or term is written inconsistently.
-Do NOT change a line because another wording sounds a little better: a draft that is
-correct and natural stays as it is. Most passages need 0 to 3 changes.
+Leave a line alone when it is already idiomatic and natural. Do not make cosmetic
+paraphrases for taste alone, but do fix a noticeably awkward line even if its meaning
+is understandable. Make as many corrections as the passage needs.
 Do NOT add a pronoun or a person ("ông", "bà", "anh", "chị", "họ") that the Chinese line
 does not have: a general statement about "a person", "someone" or "people" stays general.
 Do NOT replace the key words of the topic with milder or vaguer ones (if the speaker says
@@ -531,7 +543,7 @@ Do NOT replace the key words of the topic with milder or vaguer ones (if the spe
 Leave every line you do not change out of your answer.
 
 Rules for a corrected line:
-- natural spoken Vietnamese, as short as the draft (never more than a third longer);
+- idiomatic spoken Vietnamese, concise and easy to read aloud (never more than a third longer);
 - it keeps the line's place in the sentence: same split between lines, same . ? ! or comma at the end;
 - no Chinese characters, parentheses, quotation marks or symbols.
 {glossary_rule}
