@@ -121,8 +121,8 @@ function renderJob(job) {
   }
   if (job.log.length && job.status !== "waiting") {
     const log = el("pre", "", job.log.join("\n"));
+    log.dataset.job = job.id;
     card.append(log);
-    log.scrollTop = log.scrollHeight;
   }
   if (job.status === "waiting" || job.status === "running") {
     const b = button("Hủy", () => act(job.id, "cancel"), true);
@@ -150,9 +150,22 @@ async function refresh() {
   const jobsKey = JSON.stringify(data.jobs), videosKey = JSON.stringify(data.videos);
   if (jobsKey !== lastJobs) {
     lastJobs = jobsKey;
-    const jobs = $("jobs"); jobs.replaceChildren();
+    const jobs = $("jobs");
+    // The logs are rebuilt on every update: remember where each one was scrolled (and the page too),
+    // follow the end of a log unless the reader scrolled up, and put everything back afterwards.
+    const kept = {};
+    jobs.querySelectorAll("pre[data-job]").forEach(pre => {
+      kept[pre.dataset.job] = {top: pre.scrollTop, bottom: pre.scrollHeight - pre.scrollTop - pre.clientHeight < 8};
+    });
+    const pageTop = window.scrollY;
+    jobs.replaceChildren();
     if (!data.jobs.length) jobs.append(el("p", "note", "Chưa có link nào."));
     [...data.jobs].reverse().forEach(j => jobs.append(renderJob(j)));
+    jobs.querySelectorAll("pre[data-job]").forEach(pre => {
+      const was = kept[pre.dataset.job];
+      pre.scrollTop = was && !was.bottom ? was.top : pre.scrollHeight;
+    });
+    window.scrollTo(0, pageTop);
   }
   if (videosKey !== lastVideos) {
     lastVideos = videosKey;
