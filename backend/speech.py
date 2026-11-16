@@ -38,7 +38,7 @@ import dub_block_builder as builder
 import fit_blocks as fit
 import llm
 import test_tts_duration as tts
-from vieneu_engine import MODEL, VOICE, Narrator
+from vieneu_engine import BATCH, MODEL, VOICE, Narrator
 from workdir import SCRIPT_DIR, WORKDIR
 
 
@@ -261,6 +261,7 @@ class Speech:
         self.tts_future = None
         self.llm_off = False
         self.narrator = None
+        self.batch_size = BATCH  # blocks read in one pass (TTS_BATCH, default 1)
         self.busy = {"llm": 0.0, "tts": 0.0}
         self.counts = {"rewrites": 0, "refits": 0, "clips": 0, "cached": 0}
 
@@ -358,22 +359,27 @@ class Speech:
         self.save_state()
 
     def dispatch_tts(self, tts_pool):
+        """Send up to BATCH waiting blocks to the voice in one go (reused clips are skipped)."""
         while self.tts_future is None and self.tts_queue:
-            block_id = heapq.heappop(self.tts_queue)
-            text = self.records[block_id]["text"]
-            spoken = pronounce(text, self.pronunciations)
-            audio_file = AUDIO_DIR / f"block_{block_id:03d}.wav"
-            fingerprint = tts.content_fingerprint(spoken)
-            duration = self.cached_duration(audio_file, fingerprint)
-            if duration is not None:
-                self.counts["cached"] += 1
-                self.clip_done(block_id, text, audio_file, duration, fingerprint, cached=True)
-                continue
-            # Invalidate first, so an interrupted write is never taken for a good clip.
-            self.metadata.pop(audio_file.name, None)
-            tts.write_json_atomic(METADATA_FILE, self.metadata)
-            self.tts_future = tts_pool.submit(self.synthesize, spoken, audio_file)
-            self.tts_future.job = (block_id, text, audio_file, fingerprint)
+            jobs = []
+            while self.tts_queue and len(jobs) < self.batch_size:
+                block_id = heapq.heappop(self.tts_queue)
+                text = self.records[block_id]["text"]
+                spoken = pronounce(text, self.pronunciations)
+                audio_file = AUDIO_DIR / f"block_{block_id:03d}.wav"
+                fingerprint = tts.content_fingerprint(spoken)
+                duration = self.cached_duration(audio_file, fingerprint)
+                if duration is not None:
+                    self.counts["cached"] += 1
+                    self.clip_done(block_id, text, audio_file, duration, fingerprint, cached=True)
+                    continue
+                # Invalidate first, so an interrupted write is never taken for a good clip.
+                self.metadata.pop(audio_file.name, None)
+                jobs.append((block_id, text, audio_file, fingerprint, spoken))
+            if jobs:
+                tts.write_json_atomic(METADATA_FILE, self.metadata)
+                self.tts_future = tts_pool.submit(self.synthesize, [(job[4], job[2]) for job in jobs])
+                self.tts_future.job = jobs
 
     def cached_duration(self, audio_file, fingerprint):
         entry = self.metadata.get(audio_file.name)
@@ -393,14 +399,14 @@ class Speech:
         finally:
             self.busy["llm"] += time.perf_counter() - started
 
-    def synthesize(self, text, audio_file):
+    def synthesize(self, items):
         if self.narrator is None:  # created in the TTS thread, the only one that uses it
             started = time.perf_counter()
             self.narrator = Narrator()
             print(f"VieNeu loaded in {time.perf_counter() - started:.1f}s", flush=True)
         started = time.perf_counter()
         try:
-            return self.narrator.synthesize(text, audio_file)
+            return self.narrator.synthesize_many(items)
         finally:
             self.busy["tts"] += time.perf_counter() - started
 
@@ -412,12 +418,13 @@ class Speech:
             self.rewrite_done(future)
         if self.tts_future is not None and self.tts_future.done():
             future, self.tts_future = self.tts_future, None
-            block_id, text, audio_file, fingerprint = future.job
-            duration = future.result()  # a TTS failure stops the run
-            self.counts["clips"] += 1
-            self.metadata[audio_file.name] = {"fingerprint": fingerprint}
+            durations = future.result()  # a TTS failure stops the run
+            for (block_id, text, audio_file, fingerprint, _), duration in zip(future.job, durations):
+                self.counts["clips"] += 1
+                self.metadata[audio_file.name] = {"fingerprint": fingerprint}
             tts.write_json_atomic(METADATA_FILE, self.metadata)
-            self.clip_done(block_id, text, audio_file, duration, fingerprint, cached=False)
+            for (block_id, text, audio_file, fingerprint, _), duration in zip(future.job, durations):
+                self.clip_done(block_id, text, audio_file, duration, fingerprint, cached=False)
 
     def rewrite_done(self, future):
         block_id, kind = future.job
@@ -553,7 +560,7 @@ def parse_args():
 def main():
     run_local_checks()
     args = parse_args()
-    print(f"Model: {MODEL} | Voice: {VOICE} | LLM (shorten): {llm.describe(role="fit")}")
+    print(f"Model: {MODEL} | Voice: {VOICE} | Batch: {BATCH} | LLM (shorten): {llm.describe(role="fit")}")
     Speech(args.follow, args.target, args.fresh).run()
 
 
