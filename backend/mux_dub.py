@@ -72,11 +72,17 @@ def subtitle_filter(width, bar, ass_name=SUBS_FILE_NAME):
 
 
 def build_command(video, track, out, duration, original_volume, video_args, outro_from=None,
-                  video_filter=None):
+                  video_filter=None, freeze_tail=0.0):
     """Build the ffmpeg argument list; volume 0 drops the original audio.
 
     outro_from: when set, the output runs past the end of the dub track and the
     original audio returns to full volume from that second (music outro etc.).
+    The mix always lasts as long as the longer input and is then cut at `duration`:
+    the dub often ends a second or so after the video (it may run a few seconds
+    late), and stopping at the end of the original audio cut off its last words.
+    freeze_tail: seconds the dub runs past the end of the picture; when the video is
+    re-encoded anyway, its last frame is held that long (a stream copy cannot be
+    extended, players then simply show the last frame while the voice finishes).
     """
     command = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-i", str(track)]
     if original_volume > 0 and outro_from is not None:
@@ -90,11 +96,15 @@ def build_command(video, track, out, duration, original_volume, video_args, outr
         command += [
             "-filter_complex",
             f"[0:a]volume={original_volume}[o];"
-            "[o][1:a]amix=inputs=2:duration=shortest:normalize=0[a]",
+            "[o][1:a]amix=inputs=2:duration=longest:normalize=0[a]",
             "-map", "0:v:0", "-map", "[a]",
         ]
     else:
         command += ["-map", "0:v:0", "-map", "1:a:0"]
+    re_encoded = "copy" not in video_args
+    if freeze_tail > 0 and re_encoded:
+        hold = f"tpad=stop_mode=clone:stop_duration={freeze_tail + 0.1:.3f}"
+        video_filter = f"{video_filter},{hold}" if video_filter else hold
     if video_filter:
         command += ["-vf", video_filter]
     command += [
@@ -215,8 +225,9 @@ def run_local_checks():
     copy = ["-c:v", "copy"]
     mixed = build_command("v.mp4", "d.wav", "o.mp4", 71.96, 0.12, copy)
     assert mixed[0] == "ffmpeg" and all(isinstance(part, str) for part in mixed)
+    # "longest", cut by -t at the dub's length: a dub that ends after the video keeps its last words.
     assert mixed[mixed.index("-filter_complex") + 1] == (
-        "[0:a]volume=0.12[o];[o][1:a]amix=inputs=2:duration=shortest:normalize=0[a]")
+        "[0:a]volume=0.12[o];[o][1:a]amix=inputs=2:duration=longest:normalize=0[a]")
     assert "[a]" in mixed and "0:v:0" in mixed and "copy" in mixed
     assert mixed[mixed.index("-t") + 1] == "71.960" and mixed[-1] == "o.mp4"
     assert mixed.index("-i") < mixed.index("-filter_complex")
@@ -239,6 +250,14 @@ def run_local_checks():
     assert filtered[filtered.index("-vf") + 1] == "pad=iw:ih+2"
     assert filtered.index("-vf") < filtered.index("-c:v") and "copy" not in filtered
     assert "-vf" not in mixed
+    # The dub runs 1.3 s past the picture: a re-encoded video holds its last frame that long...
+    held = build_command("v.mp4", "d.wav", "o.mp4", 10, 0.12, ["-c:v", "libx264"],
+                         video_filter="pad=iw:ih+2", freeze_tail=1.3)
+    assert held[held.index("-vf") + 1] == "pad=iw:ih+2,tpad=stop_mode=clone:stop_duration=1.400"
+    alone = build_command("v.mp4", "d.wav", "o.mp4", 10, 0.12, ["-c:v", "libx264"], freeze_tail=1.3)
+    assert alone[alone.index("-vf") + 1] == "tpad=stop_mode=clone:stop_duration=1.400"
+    # ...a stream copy cannot be filtered, so it is left as it is.
+    assert "-vf" not in build_command("v.mp4", "d.wav", "o.mp4", 10, 0.12, copy, freeze_tail=1.3)
 
     probe_data = {
         "format": {"duration": "120.5"},
@@ -336,11 +355,13 @@ def main():
     keep_outro = (args.original_volume > 0 and source_length is not None
                   and source_length > duration + OUTRO_MIN_SECONDS)
     output_length = source_length if keep_outro else duration
+    # The dub may end after the picture (it is allowed to run a little late): keep its last words.
+    overrun = duration - source_length if source_length is not None and duration > source_length else 0.0
     # ffmpeg runs inside dub_output/ for subtitles, so every path must be absolute.
     command = build_command(args.video.resolve(), TRACK_FILE.resolve(), args.out, output_length,
                             args.original_volume,
                             video_args, outro_from=duration if keep_outro else None,
-                            video_filter=video_filter)
+                            video_filter=video_filter, freeze_tail=overrun)
 
     print(f"Probe: {tool}")
     print(f"Dub track length: {duration:.3f}s | source video length: "
@@ -349,6 +370,9 @@ def main():
     if keep_outro:
         print(f"Keeping the last {source_length - duration:.1f}s of the original audio "
               "at full volume (after the dub ends)")
+    if overrun:
+        held = "holding the last frame" if "copy" not in video_args else "the last frame stays on screen"
+        print(f"The dub ends {overrun:.2f}s after the video: keeping its last words ({held})")
     print(describe_offset("Video", source["video"]))
     if args.original_volume > 0:
         print(describe_offset("Original audio", source["audio"]))
