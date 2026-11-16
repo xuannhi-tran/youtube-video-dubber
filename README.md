@@ -135,6 +135,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `SUB_FONT`, `SUB_FONT_SIZE`, `SUB_BAR` | Defaults for `--subs`: font name (default `Arial`), text size and bar height in pixels (0 = automatic). The command-line options win. |
 | `TTS_VOICE` | VieNeu preset voice, default `xuan_vinh` (e.g. `thien_minh`). `python compare_voices.py` lets you listen to every voice. Changing it reads all blocks again (clips are keyed by voice); the speech rate is calibrated per voice. |
 | `TTS_DEVICE` | `cpu` (default, the ONNX engine) or `cuda` to read on the GPU with PyTorch, about 12 times faster per sentence on an RTX 4060 Laptop (see [Reading on the GPU](#reading-on-the-gpu)). GPU clips are kept apart from CPU clips, so switching reads every block again. |
+| `TTS_BATCH` | Blocks read in one pass on the GPU, 1 to 32, default 1 (see [Reading on the GPU](#reading-on-the-gpu)). |
 
 `python llm.py` checks the logic and makes one real call for translation and one for shortening, which is the quickest way to test your settings. `python llm.py --list` lists the models your Groq key can use, `python llm.py --list gemini` the ones your Gemini key can use (copy the name exactly). `backend/.env.example` has every setting with a short comment.
 
@@ -153,7 +154,7 @@ Then put `TTS_DEVICE=cuda` in `backend/.env`. `dub.py` checks at the start that 
 - On the GPU, `transformers` downloads and runs Python code from the Hugging Face repo `OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano` (its version is not pinned). Only enable this if you accept that.
 - GPU and CPU voices sound slightly different, so switching device reads every block again (and calibrates the speaking rate again).
 - Whisper, Ollama and the voice share the GPU's 8 GB; if you run out of memory, keep `TTS_DEVICE=cpu`, or stop Ollama between runs.
-- Reading several blocks at once (`infer_batch`, about 35 times real time in the test) is not used yet; the speech stage still reads one block at a time.
+- `TTS_BATCH=8` (1 to 32, default 1) reads several waiting blocks in one GPU pass (about 35 times real time in the test instead of 12). It saves little in practice: the speech stage is mostly waiting for the shortening LLM, so a whole 8-minute video only gains some 25 seconds, and it only helps when many blocks are waiting at once (e.g. reading a finished job again). If a batch fails (e.g. out of GPU memory) the blocks are read one by one.
 
 ### Which LLM for what
 
