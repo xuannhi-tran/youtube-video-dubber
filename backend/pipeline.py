@@ -493,21 +493,29 @@ def parse_review(answer, count):
     return corrections
 
 
-def apply_review(draft, corrections):
-    """(reviewed translation, number of lines changed). A correction that is unusable is skipped."""
+def apply_review(draft, corrections, skipped=None):
+    """(reviewed translation, number of lines changed). A correction that is unusable is skipped;
+    when `skipped` is a list, "line N: reason" is added to it for each one."""
+    skipped = [] if skipped is None else skipped
     result = [dict(item) for item in draft]
     changed = 0
     for number, text in sorted(corrections.items()):
         old = result[number - 1]["text"]
         limit = max(len(old.split()) * REVIEW_MAX_GROWTH, len(old.split()) + 3)
-        if CJK.search(text) or text == old or len(text.split()) > limit:
-            continue
-        result[number - 1]["text"] = text
-        changed += 1
+        if CJK.search(text):
+            skipped.append(f"line {number}: has Chinese characters")
+        elif text == old:
+            skipped.append(f"line {number}: same as the draft")
+        elif len(text.split()) > limit:
+            skipped.append(f"line {number}: too long ({len(text.split())} words, draft {len(old.split())})")
+        else:
+            result[number - 1]["text"] = text
+            changed += 1
     if changed:
         try:
             check_translation(result, len(draft))
-        except ValueError:
+        except ValueError as error:
+            skipped.append(f"all fixes dropped: {error}")
             return [dict(item) for item in draft], 0
     return result, changed
 
@@ -521,7 +529,14 @@ def review_chunk(chunk, draft, generate=None):
             "\n\nYour previous answer could not be read. Answer with ONLY a JSON array like "
             '[{"n": 3, "text": "..."}], or [].')
         try:
-            return apply_review(draft, parse_review(generate(request), len(draft)))[0]
+            answer = generate(request)
+            corrections, skipped = parse_review(answer, len(draft)), []
+            result, changed = apply_review(draft, corrections, skipped)
+            if not changed:  # nothing to show for this chunk: print what the model said, to tell "all fine" from "ignored"
+                print(f"  review: the model proposed {len(corrections)} fixes, none used"
+                      + (f" ({'; '.join(skipped)})" if skipped else "")
+                      + f". Its answer: {' '.join(str(answer).split())[:300]!r}", flush=True)
+            return result
         except ValueError as error:
             print(f"Review answer not usable ({error}). Attempt {attempt}/2")
     print("Keeping the draft translation for this chunk.")
@@ -715,6 +730,9 @@ def run_local_checks():
     fixed, count = apply_review(draft, {1: "Thiên tài Nietzsche cũng từng nói", 2: "quá用力", 3: "Ông ấy rất giỏi."})
     assert count == 1 and fixed[0]["text"] == "Thiên tài Nietzsche cũng từng nói" and fixed[1] == draft[1]
     assert apply_review(draft, {3: "Ông ấy rất giỏi " + "nữa " * 9})[1] == 0  # far longer than the draft
+    reasons = []
+    apply_review(draft, {2: "quá用力", 3: "Ông ấy rất giỏi.", 1: "x " * 40}, reasons)
+    assert len(reasons) == 3 and "Chinese" in reasons[1] and "same as" in reasons[2] and "too long" in reasons[0]
     sentences = [{"text": f"câu {i}."} for i in range(6)]
     assert apply_review(sentences, {number: "chưa hết câu" for number in range(1, 7)}) == (sentences, 0)  # no sentence end left
     assert draft[0]["text"].startswith("Thiên tài Nietzsche của")  # the draft itself is never edited
