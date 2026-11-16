@@ -191,6 +191,13 @@ def preflight():
         if problem:
             problems.append(problem)
     try:
+        import vieneu_engine  # reads TTS_DEVICE; does not load the voice model
+        problem = vieneu_engine.device_problem()
+    except ValueError as error:
+        problem = f"{error} (backend/.env)"
+    if problem:
+        problems.append(problem)
+    try:
         fallback = llm.fallback_settings("fit")
     except (RuntimeError, ValueError) as error:
         problems.append(f"{error} (FIT_FALLBACK_*, backend/.env)")

@@ -134,8 +134,27 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `LOCAL_LLM_URL`, `LOCAL_LLM_TIMEOUT`, `LOCAL_LLM_THINK` | Local server settings, see below. |
 | `SUB_FONT`, `SUB_FONT_SIZE`, `SUB_BAR` | Defaults for `--subs`: font name (default `Arial`), text size and bar height in pixels (0 = automatic). The command-line options win. |
 | `TTS_VOICE` | VieNeu preset voice, default `xuan_vinh` (e.g. `thien_minh`). `python compare_voices.py` lets you listen to every voice. Changing it reads all blocks again (clips are keyed by voice); the speech rate is calibrated per voice. |
+| `TTS_DEVICE` | `cpu` (default, the ONNX engine) or `cuda` to read on the GPU with PyTorch, about 12 times faster per sentence on an RTX 4060 Laptop (see [Reading on the GPU](#reading-on-the-gpu)). GPU clips are kept apart from CPU clips, so switching reads every block again. |
 
 `python llm.py` checks the logic and makes one real call for translation and one for shortening, which is the quickest way to test your settings. `python llm.py --list` lists the models your Groq key can use, `python llm.py --list gemini` the ones your Gemini key can use (copy the name exactly). `backend/.env.example` has every setting with a short comment.
+
+### Reading on the GPU
+
+The voice (VieNeu) reads on the CPU by default, slightly slower than real time. With an NVIDIA GPU it is about 12 times faster per sentence (measured on an RTX 4060 Laptop: 4 to 5 s of audio in about 0.4 s instead of 4 to 5 s). In the project venv:
+
+```
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+pip install transformers safetensors
+python tts_speed_test.py --only cuda     # should print "x real time" well above 1
+```
+
+Then put `TTS_DEVICE=cuda` in `backend/.env`. `dub.py` checks at the start that PyTorch sees the GPU. The first GPU run downloads the PyTorch model (a few hundred MB). Notes:
+
+- The torch download is a few GB. Tested with torch 2.11 (cu128) on Python 3.14; vieneu's own `[cuda]` extra pins torch 2.8, which you do not need to follow.
+- On the GPU, `transformers` downloads and runs Python code from the Hugging Face repo `OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano` (its version is not pinned). Only enable this if you accept that.
+- GPU and CPU voices sound slightly different, so switching device reads every block again (and calibrates the speaking rate again).
+- Whisper, Ollama and the voice share the GPU's 8 GB; if you run out of memory, keep `TTS_DEVICE=cpu`, or stop Ollama between runs.
+- Reading several blocks at once (`infer_batch`, about 35 times real time in the test) is not used yet; the speech stage still reads one block at a time.
 
 ### Which LLM for what
 
@@ -241,7 +260,7 @@ python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5
 
 - Chinese → Vietnamese only, one VieNeu voice per run (`xuan_vinh` by default, see `TTS_VOICE`).
 - The original audio is only turned down, not removed: voices are not separated from music. Use `--original-volume` to taste (0 drops it).
-- VieNeu on CPU is slow, so a long video takes a long time to read. GPU speech is not implemented.
+- VieNeu on CPU is slow, so a long video takes a long time to read; `TTS_DEVICE=cuda` reads on the GPU (see above), but still one block at a time.
 - Whisper needs a CUDA GPU. Without one, change `device` in `pipeline.py` (slower).
 - Vietnamese is longer than Chinese in the same time, so some blocks are shortened by the LLM, which can lose detail; some blocks over about 12 s have no sentence break to split at. Timing is kept by letting the dub drift (up to 3 s) and by small speed-ups rather than exact sync.
 - The Groq free tier stops at its daily limit; the run keeps what it has and continues when you run the same command later.

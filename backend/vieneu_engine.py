@@ -21,7 +21,19 @@ from workdir import SCRIPT_DIR
 
 load_dotenv(SCRIPT_DIR / ".env")
 
-MODEL = "vieneu-v3-turbo"
+def read_device(value):
+    """'cpu' (default) or 'cuda' from TTS_DEVICE; anything else is an error."""
+    device = (value or "").strip().lower() or "cpu"
+    if device not in ("cpu", "cuda"):
+        raise ValueError(f"TTS_DEVICE must be cpu or cuda, got {value!r}")
+    return device
+
+
+# TTS_DEVICE=cuda reads with PyTorch on the GPU (needs torch with CUDA, see the README); the default
+# keeps the ONNX CPU engine. The GPU reads slightly differently, so its clips and speaking-rate
+# calibration are kept apart from the CPU ones (MODEL is part of both).
+DEVICE = read_device(os.getenv("TTS_DEVICE"))
+MODEL = "vieneu-v3-turbo" + ("" if DEVICE == "cpu" else f"-{DEVICE}")
 # Slug of the preset voice name (see slugify()). TTS_VOICE in .env overrides it, e.g. TTS_VOICE=thien_minh;
 # `python compare_voices.py` lists the voices and lets you listen to them. Clips are stored with the voice
 # they were read with, so changing it reads every block again.
@@ -44,6 +56,21 @@ def find_voice(voices, wanted):
     raise ValueError(f"No preset voice matches {wanted!r}. Available: {available}")
 
 
+def device_problem(device=DEVICE):
+    """None when `device` can be used; otherwise what to fix (checked before a long run)."""
+    if device != "cuda":
+        return None
+    try:
+        import torch
+    except ImportError:
+        return ("TTS_DEVICE=cuda needs PyTorch with CUDA, which is not installed. "
+                "See 'Reading on the GPU' in the README, or remove TTS_DEVICE from .env.")
+    if not torch.cuda.is_available():
+        return ("TTS_DEVICE=cuda but PyTorch cannot see a CUDA GPU (is this the CPU build of torch?). "
+                "Install the CUDA build (README, 'Reading on the GPU') or remove TTS_DEVICE from .env.")
+    return None
+
+
 def measure_wav(path):
     """Duration in seconds of a PCM WAV; raises ValueError for empty audio."""
     with wave.open(str(path), "rb") as wav_file:
@@ -61,7 +88,10 @@ class Narrator:
             raise SystemExit("vieneu is not installed. Run: pip install vieneu")
         # Cached model files that are symlinks are rejected by ONNX Runtime.
         hf_cache_fix.materialize_symlinks()
-        self.engine = Vieneu()
+        problem = device_problem()
+        if problem:
+            raise SystemExit(problem)
+        self.engine = Vieneu(device="cuda") if DEVICE == "cuda" else Vieneu()
         self.voice_id = find_voice(self.engine.list_preset_voices(), voice)
         self.sample_rate = self.engine.sample_rate
 
@@ -83,6 +113,15 @@ class Narrator:
 
 
 def run_local_checks():
+    assert read_device(None) == "cpu" and read_device("") == "cpu" and read_device(" CUDA ") == "cuda"
+    try:
+        read_device("gpu")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown TTS_DEVICE must be rejected")
+    assert device_problem("cpu") is None
+    assert MODEL.startswith("vieneu-v3-turbo")
     assert slugify("Hải Đăng") == "hai_dang"
     assert slugify("hai_dang") == "hai_dang"
     voices = [("Hải Đăng (Nam)", "Hải Đăng"), ("Thiện Minh (Nam)", "Thiện Minh")]
