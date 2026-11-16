@@ -55,6 +55,21 @@ download -> transcribe + translate  ─┐
 
 Each script also has its own checks that run when it starts (`run_local_checks`), and most can be run alone from inside a job folder by setting `DUB_WORKDIR` to the job folder.
 
+### Freeing disk space
+
+A job keeps many files (clips of every block, audio of the source, the source video). Only `dubbed.mp4` is needed to watch the result, so jobs can clean up after themselves:
+
+```
+CLEANUP=clips      # in backend/.env (default: none)
+python dub.py URL --cleanup clips            # the same for one run
+python cleanup.py JOB_ID --level clips       # clean a finished job by hand (--all-jobs for every job)
+```
+
+- `clips` deletes the voice clips and the audio files (the biggest part, often more than the video). `--original-volume` and `--subs` still re-mux in seconds because the source video and the dub track stay.
+- `all` also deletes the source video and the dub track: only `dubbed.mp4`, the translation and small files stay. If you ask for something later (`--subs`, `--original-volume`, `--redo`), `dub.py` downloads the video again and reads the voice again from the saved text; it never translates or shortens again.
+- Nothing is removed unless the video was finished (`dubbed.mp4` exists).
+- On the web page every finished video has a "Xóa" button that deletes its whole folder after a confirmation (not while that video is being made). The list also shows the size of the whole folder.
+
 ### Redoing a stage
 
 ```
@@ -134,6 +149,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `LOCAL_LLM_URL`, `LOCAL_LLM_TIMEOUT`, `LOCAL_LLM_THINK` | Local server settings, see below. |
 | `SUB_FONT`, `SUB_FONT_SIZE`, `SUB_BAR` | Defaults for `--subs`: font name (default `Arial`), text size and bar height in pixels (0 = automatic). The command-line options win. |
 | `TTS_VOICE` | VieNeu preset voice, default `xuan_vinh` (e.g. `thien_minh`). `python compare_voices.py` lets you listen to every voice. Changing it reads all blocks again (clips are keyed by voice); the speech rate is calibrated per voice. |
+| `CLEANUP` | `none` (default), `clips` or `all`: what to delete after a video is made, see [Freeing disk space](#freeing-disk-space). |
 | `TTS_DEVICE` | `cpu` (default, the ONNX engine) or `cuda` to read on the GPU with PyTorch, about 12 times faster per sentence on an RTX 4060 Laptop (see [Reading on the GPU](#reading-on-the-gpu)). GPU clips are kept apart from CPU clips, so switching reads every block again. |
 | `TTS_BATCH` | Blocks read in one pass on the GPU, 1 to 32, default 1 (see [Reading on the GPU](#reading-on-the-gpu)). |
 
@@ -249,6 +265,7 @@ python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5
 | Script | Use |
 | --- | --- |
 | `web.py` | The local web page described above (`web_ui.html` is its page). |
+| `cleanup.py` | Frees disk space of finished jobs, see [Freeing disk space](#freeing-disk-space). |
 | `compare_translators.py JOB_ID` | Translates the same window of a job with several models, side by side, into `translator_compare_output/`. |
 | `compare_voices.py` | Reads a sample with every VieNeu preset voice and writes an `index.html` to listen and compare. |
 | `tts_speed_test.py` | Measures VieNeu speed on CPU vs GPU. |

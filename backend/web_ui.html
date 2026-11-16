@@ -174,9 +174,18 @@ async function refresh() {
     data.videos.forEach(v => {
       const card = el("div", "card");
       const row = el("div", "vid");
-      row.append(el("div", "url", `${v.video_id}  ·  ${(v.size / 1e6).toFixed(1)} MB  ·  ${new Date(v.time * 1000).toLocaleString("vi-VN")}`));
+      const folder = v.folder_size > v.size * 1.1 ? `  ·  cả thư mục ${(v.folder_size / 1e6).toFixed(0)} MB` : "";
+      row.append(el("div", "url", `${v.video_id}  ·  ${(v.size / 1e6).toFixed(1)} MB${folder}  ·  ${new Date(v.time * 1000).toLocaleString("vi-VN")}`));
       const open = el("button", "ghost", "Xem"); open.onclick = () => { open.replaceWith(playerFor(v.video_id)); };
-      row.append(open); card.append(row); list.append(card);
+      const del = el("button", "ghost", "Xóa");
+      del.onclick = async () => {
+        if (!confirm(`Xóa hẳn video ${v.video_id} và cả thư mục của nó (${((v.folder_size || v.size) / 1e6).toFixed(0)} MB)? Muốn có lại phải làm từ đầu.`)) return;
+        const res = await fetch(`/api/videos/${encodeURIComponent(v.video_id)}/delete`, {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+        if (!res.ok) alert((await res.json()).error || "Không xóa được");
+        refresh();
+      };
+      const buttons = el("div", "opts"); buttons.append(open, del);
+      row.append(buttons); card.append(row); list.append(card);
     });
   }
 }

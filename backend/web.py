@@ -24,6 +24,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+import cleanup
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 JOBS_DIR = SCRIPT_DIR / "dub_jobs_output"  # same folder dub.py uses
 PAGE = SCRIPT_DIR / "web_ui.html"
@@ -163,6 +165,8 @@ def run_local_checks():
     assert host_allowed("127.0.0.1:8765") and host_allowed("localhost:1")
     assert not host_allowed("evil.com") and not host_allowed("evil.com:80") and not host_allowed(None)
     assert VIDEO_ID.match("aB-1_x") and not VIDEO_ID.match("../x")
+    assert re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/delete", "/api/videos/aB-1_x/delete")
+    assert not re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/delete", "/api/videos/../x/delete")
 
 
 # ---------------------------------------------------------
@@ -214,6 +218,12 @@ class Jobs:
                     item["hold"] = False
                     return True
         return False
+
+    def in_use(self, video_id):
+        """True while a queued, running or paused job is working on this video."""
+        with self.lock:
+            return any(i["video_id"] == video_id and i["status"] in ("waiting", "running", "paused")
+                       for i in self.items)
 
     def blocked(self):
         """The queue waits while a job is paused on a limit or a finished one is not released."""
@@ -285,6 +295,17 @@ class Jobs:
             item["hold"] = hold
 
 
+_folder_sizes = {}  # video id -> (measured at, bytes); measuring walks every file of the job
+
+
+def job_size(folder):
+    now = time.time()
+    measured = _folder_sizes.get(folder.name)
+    if measured is None or now - measured[0] > 60:
+        measured = _folder_sizes[folder.name] = (now, cleanup.folder_size(folder))
+    return measured[1]
+
+
 def finished_videos():
     """Videos already on disk, newest first."""
     result = []
@@ -293,7 +314,8 @@ def finished_videos():
             video = folder / "dub_output" / "dubbed.mp4"
             if VIDEO_ID.match(folder.name) and video.is_file():
                 stat = video.stat()
-                result.append({"video_id": folder.name, "size": stat.st_size, "time": stat.st_mtime})
+                result.append({"video_id": folder.name, "size": stat.st_size, "time": stat.st_mtime,
+                               "folder_size": job_size(folder)})
     return sorted(result, key=lambda entry: entry["time"], reverse=True)
 
 
@@ -400,6 +422,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(error)}, 400)
                 return
             self.send_json({"id": JOBS.add(url, arguments)})
+        elif re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/delete", path):
+            video_id = path.split("/")[3]
+            if JOBS.in_use(video_id):
+                self.send_json({"error": "Video này đang được làm, hủy job trước rồi hãy xóa."}, 409)
+                return
+            try:
+                freed = cleanup.delete_job(video_id)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, 404)
+                return
+            _folder_sizes.pop(video_id, None)
+            self.send_json({"ok": True, "freed": freed})
         elif re.fullmatch(r"/api/jobs/\d+/(cancel|resume)", path):
             action = JOBS.cancel if path.endswith("/cancel") else JOBS.resume
             ok = action(int(path.split("/")[3]))
