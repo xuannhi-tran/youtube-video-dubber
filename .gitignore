@@ -14,3 +14,9 @@ block_tts_output*/
 *_fitted.json
 *_fitted_v1.json
 *.mp4
+# local secrets, job data and scratch files
+backend/.env
+backend/jobs/
+backend/dub_jobs_output/
+*.log
+.DS_Store

@@ -1,29 +1,67 @@
 # YouTube Video Dubber (Chinese → Vietnamese)
 
-A personal tool that dubs a Chinese YouTube video into Vietnamese. You give it a link and get back an MP4 with a Vietnamese voice-over. I built it because I wanted to watch Chinese knowledge videos without reading subtitles the whole time.
+Dub a Chinese YouTube video into Vietnamese. Give it a link and get back an MP4 with a Vietnamese voice-over (and, if you want, Vietnamese subtitles). I built it to watch Chinese knowledge videos without reading subtitles the whole time.
 
-It is an offline pipeline, not real-time (the repo name says "live", but it isn't). Everything runs on your own computer except the translation, which can use Groq, Gemini or a local model (Ollama / LM Studio).
+It is an offline pipeline, not real-time. Speech recognition and the voice run on your own computer; only the translation text goes to an LLM of your choice (Groq, Gemini, or a local Ollama / LM Studio model).
 
-**Status:** works end to end on real videos (Groq, and a 2-minute clip with a local Ollama model). It has not been tested on other languages, on long videos with a local model, or on anything but Windows. Translation quality with a 7-8B local model is clearly below Groq's `gpt-oss-120b`.
+![The local web page](docs/web-ui.png)
 
-## Quick start
+## Features
+
+- One command or one web page: link in, dubbed MP4 out. Finished stages are cached, so an interrupted run resumes where it stopped.
+- Speech recognition with faster-whisper `large-v3`, translation in chunks with context, a glossary for names and terms.
+- Optional second pass where another LLM checks the draft translation and fixes only the wrong lines.
+- Lines that do not fit their time slot are shortened by the LLM before they are read, so the dub keeps up with the video.
+- Local Vietnamese voice (VieNeu v3 Turbo), on the CPU or on an NVIDIA GPU.
+- Optional Vietnamese subtitles under the picture, original audio turned down (not removed), queue and cleanup in the local web page.
+
+## Requirements
+
+- **Windows** with Python 3.10+. This is the only platform it has been tested on; Linux/macOS may need small changes (for example in `cuda_dlls.py`).
+- **An NVIDIA GPU** for Whisper: the code loads `large-v3` on CUDA in float16 (about 3 GB download, roughly 4-5 GB of VRAM). Developed on an RTX 4060 Laptop with 8 GB. Reading the voice on the GPU (`TTS_DEVICE=cuda`) is optional and shares the same card. Without a GPU, change `device` in `pipeline.py` and expect it to be much slower.
+- **ffmpeg** and **ffprobe** on your PATH, and **yt-dlp** (installed by pip below).
+- An **LLM**: a free Groq or Gemini API key, or a local model through [Ollama](https://ollama.com) or LM Studio (optional).
+- About 10 GB of free disk for models, plus space for videos (see [Freeing disk space](#freeing-disk-space)).
+
+## Install
 
 ```
-cd backend
+git clone https://github.com/xuannhi-tran/youtube-live-dubber.git
+cd youtube-live-dubber\backend
 python -m venv .venv
 .venv\Scripts\activate
-pip install yt-dlp faster-whisper vieneu httpx python-dotenv numpy
-pip install nvidia-cublas-cu12 nvidia-cudnn-cu12     # CUDA libraries for Whisper (see Setup)
+pip install -r requirements.txt
+copy .env.example .env
 ```
 
-Create `backend/.env` with a key (see [Settings](#settings)), then:
+Then put at least one key in `backend/.env` (next section) and run:
 
 ```
 python dub.py "https://www.youtube.com/watch?v=VIDEO_ID" --max-seconds 120   # try the first 2 minutes
 python dub.py "https://www.youtube.com/watch?v=VIDEO_ID"                      # the whole video
 ```
 
-The result is `backend/dub_jobs_output/<video id>/dub_output/dubbed.mp4`.
+The result is `backend/dub_jobs_output/<video id>/dub_output/dubbed.mp4`. `dub.py` checks packages, ffmpeg, the key and the local LLM server before it starts and lists what is missing.
+
+### Getting an API key
+
+- **Groq** (free tier): create a key at <https://console.groq.com/keys> and set `GROQ_API_KEY=` in `backend/.env`.
+- **Gemini** (free tier): create a key in Google AI Studio, <https://aistudio.google.com/apikey>, and set `GEMINI_API_KEY=`.
+- **No key**: use a local model, see [Using a local LLM (Ollama)](#using-a-local-llm-ollama-instead-of-groq).
+
+Free quotas and model names change often and differ per account (some models have only a few requests per day). Check the limits shown in your Groq / AI Studio console, and run `python llm.py --list gemini` to see the exact model names your key can use. When a daily limit is reached the job keeps what it has and continues when you run the same command later.
+
+### Main options
+
+```
+python dub.py URL --max-seconds 120         # only the first N seconds
+python dub.py URL --subs                    # Vietnamese subtitles under the picture
+python dub.py URL --original-volume 0.1     # louder original audio (default 0.02, 0 = off)
+python dub.py URL --redo transcribe|speech|mux   # redo from a stage
+python dub.py URL --cleanup clips|all       # delete big files after the video is made
+```
+
+Everything else is set in `backend/.env`, see [Settings](#settings).
 
 ### Web page
 
@@ -69,7 +107,7 @@ python cleanup.py JOB_ID --level clips       # clean a finished job by hand (--a
 - `all` also deletes the source video and the dub track: only `dubbed.mp4`, the translation and small files stay. If you ask for something later (`--subs`, `--original-volume`, `--redo`), `dub.py` downloads the video again and reads the voice again from the saved text; it never translates or shortens again.
 - Nothing is removed unless the video was finished (`dubbed.mp4` exists).
 - On the web page every finished video has a "Xóa" button that deletes its whole folder after a confirmation (not while that video is being made). The list also shows the size of the whole folder.
-- `EXPORT_DIR=D:\Google Drive\Dubbed` (the folder must exist) copies every finished `dubbed.mp4` there as `<video id>.mp4` when its job ends. Point it at a folder that a sync app (Google Drive for desktop, OneDrive, Dropbox) uploads and the video is in the cloud with no extra step; the job folder can then be cleaned or deleted, the copy stays (the web page says which videos have one). `python sync_copy.py` copies the videos that were finished before you set it.
+- `EXPORT_DIR=C:\Users\you\Google Drive\Dubbed` (the folder must exist) copies every finished `dubbed.mp4` there as `<video id>.mp4` when its job ends. Point it at a folder that a sync app (Google Drive for desktop, OneDrive, Dropbox) uploads and the video is in the cloud with no extra step; the job folder can then be cleaned or deleted, the copy stays (the web page says which videos have one). `python sync_copy.py` copies the videos that were finished before you set it.
 
 ### Redoing a stage
 
@@ -100,16 +138,9 @@ python dub.py URL --glossary-only        # create the job folder and glossary.js
 
 Everything under `*_output/`, plus `.env`, audio and video, is git-ignored.
 
-## Setup
+## Setup notes
 
-You need:
-
-- **Python 3.10+**, **ffmpeg** and **ffprobe** on your PATH.
-- A **CUDA GPU** for Whisper (`pipeline.py` loads `large-v3` on `cuda` in float16; the first run downloads about 3 GB). On Windows, `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` from pip provide the libraries, and `cuda_dlls.py` makes them visible to Windows before Whisper loads.
-- **VieNeu** for speech. It runs on the CPU, so there is no TTS quota, but it is slow. `hf_cache_fix.py` works around ONNX Runtime refusing Hugging Face cache symlinks.
-- An **LLM** for translation and shortening: a Groq or Gemini key, or a local Ollama / LM Studio model.
-
-`dub.py` checks all of this (packages, ffmpeg, LLM key, local server and model) before it starts, and lists what is missing.
+Install steps and requirements are at the top. Two details: on Windows `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` (in `requirements.txt`) provide the CUDA libraries for Whisper, and `cuda_dlls.py` makes them visible before Whisper loads. `hf_cache_fix.py` works around ONNX Runtime refusing Hugging Face cache symlinks on Windows.
 
 ### Vietnamese subtitles
 
@@ -241,7 +272,7 @@ ollama pull qwen2.5:7b-instruct  # alternative
 ollama list                      # check it is there
 ```
 
-To keep models on another drive, set `OLLAMA_MODELS` (e.g. `setx OLLAMA_MODELS "D:\ollama\models"`), restart Ollama and open a new terminal before pulling.
+To keep models on another drive, set `OLLAMA_MODELS` (e.g. `setx OLLAMA_MODELS "C:\ollama\models"`), restart Ollama and open a new terminal before pulling.
 
 Both are Q4 builds that fit an 8 GB GPU. Whisper also uses the GPU, but only at the start, and Ollama unloads its model after a few idle minutes, so the stages mostly take turns. If you run out of VRAM, pick a smaller model such as `qwen3:4b`.
 
@@ -292,10 +323,10 @@ python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5
 | `tts_speed_test.py` | Measures VieNeu speed on CPU vs GPU. |
 | `fit_blocks.py` | The shortening step on its own. Dry run by default; `--apply` calls the LLM. `speech.py` uses it too. |
 | `test_block_tts_duration.py`, `test_tts_duration.py`, `analyze_tts_silence.py` | Benchmark and silence analysis of clips; `speech.py` reuses their helpers. |
-| `test_tts.py`, `test_translate.py`, `test_elevenlabs.py`, `test_transcribe.py` | Early prototypes (Gemini, ElevenLabs, Whisper). Not part of the pipeline; some need extra packages (`google-genai`, `elevenlabs`) and keys. |
 
 ## Limitations
 
+- Tested end to end on Windows with Groq and Gemini, and on a short clip with a local Ollama model. Not tested on other languages or other operating systems. Translation quality with a 7-8B local model is clearly below Groq's `gpt-oss-120b`.
 - Chinese → Vietnamese only, one VieNeu voice per run (`xuan_vinh` by default, see `TTS_VOICE`).
 - The original audio is only turned down, not removed: voices are not separated from music. Use `--original-volume` to taste (0 drops it).
 - VieNeu on CPU is slow, so a long video takes a long time to read; `TTS_DEVICE=cuda` reads on the GPU (see above), but still one block at a time.
@@ -304,6 +335,23 @@ python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5
 - The Groq free tier stops at its daily limit; the run keeps what it has and continues when you run the same command later.
 - Quality depends on the LLM and on speech-recognition errors. Check the result before sharing it.
 
-## Notes on content
+## Notes on content and safety
 
-Dub only videos you have the right to use. The demo videos used for testing belong to someone else and are not included.
+- **Copyright.** Dub only videos you own or have permission to use. Downloading and re-publishing someone else's video, even dubbed, can infringe their copyright and break YouTube's terms. Credit the source and ask the creator before you publish anything.
+- **AI voice and translation.** The voice is synthetic and the translation can contain mistakes. Check the result before sharing, and say it is AI-dubbed.
+- **Remote code on the GPU.** With `TTS_DEVICE=cuda`, `transformers` downloads and runs Python code from the Hugging Face repo `OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano` (version not pinned). Enable it only if you accept that. The default CPU mode does not do this.
+- **Web page.** `web.py` listens only on `127.0.0.1` and checks the Host/Origin headers. Do not expose it to a network: it can start jobs and use your API keys.
+- **API keys** live only in `backend/.env`, which is git-ignored. Never commit it.
+
+## Third-party components and licenses
+
+This project is MIT-licensed (see `LICENSE`). It uses, but does not include, these components, each under its own license. Check the current terms before you redistribute or use the output commercially.
+
+| Component | Used for | License |
+| --- | --- | --- |
+| [VieNeu-TTS](https://github.com/pnnbao97/VieNeu-TTS) v3 Turbo and its preset voices (including `xuan_vinh`) | Vietnamese speech | Apache-2.0. Keep the license notice and credit the VieNeu-TTS authors; do not use the voices to clone a real person without their permission. |
+| [faster-whisper](https://github.com/SYSTRAN/faster-whisper) with OpenAI Whisper `large-v3` | Speech recognition | MIT (code), Apache-2.0 (model) |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Downloading videos | Unlicense |
+| [ffmpeg](https://ffmpeg.org) | Audio and video processing | LGPL/GPL, depending on your build; installed separately |
+| Gemma 4, Qwen3 (optional LLMs) | Translation, review, shortening | Apache-2.0 for the open weights; using them through Groq or Gemini is also subject to those services' terms |
+
