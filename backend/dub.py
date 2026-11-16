@@ -7,6 +7,7 @@
     python dub.py URL --original-volume 0.04   # mix the original voice lower (0 = drop it); redoes only the last stage
     python dub.py URL --subs               # burn Vietnamese subtitles into a black bar under the video
     python dub.py URL --cleanup clips      # afterwards delete the voice clips and audio (or set CLEANUP in .env)
+                                           # EXPORT_DIR in .env also copies the result to that folder
 
 Each video gets its own folder, dub_jobs_output/<video id>/, and the result is
 dub_jobs_output/<video id>/dub_output/dubbed.mp4. Finished stages are skipped on
@@ -30,6 +31,7 @@ import time
 
 import cleanup
 import llm
+import sync_copy
 from workdir import SCRIPT_DIR, replace_file
 
 
@@ -215,6 +217,9 @@ def preflight():
         cleanup.read_level(os.getenv("CLEANUP"))
     except ValueError as error:
         problems.append(f"{error} (backend/.env)")
+    problem = sync_copy.settings_problem()
+    if problem:
+        problems.append(problem)
     try:
         import vieneu_engine  # reads TTS_DEVICE; does not load the voice model
         problem = vieneu_engine.device_problem()
@@ -529,6 +534,9 @@ def main():
         finish(name)
 
     result = job / "dub_output" / "dubbed.mp4"
+    copy = sync_copy.export(job)  # before the cleanup; it never removes dubbed.mp4 anyway
+    if copy:
+        print(f"\nCopied to {copy} (EXPORT_DIR)")
     level = args.cleanup or cleanup.read_level(os.getenv("CLEANUP"))
     freed = cleanup.clean_job(job, level)
     if freed:

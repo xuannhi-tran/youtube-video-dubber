@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import cleanup
+import sync_copy  # EXPORT_DIR (reads backend/.env)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 JOBS_DIR = SCRIPT_DIR / "dub_jobs_output"  # same folder dub.py uses
@@ -315,7 +316,8 @@ def finished_videos():
             if VIDEO_ID.match(folder.name) and video.is_file():
                 stat = video.stat()
                 result.append({"video_id": folder.name, "size": stat.st_size, "time": stat.st_mtime,
-                               "folder_size": job_size(folder)})
+                               "folder_size": job_size(folder),
+                               "exported": sync_copy.existing_copy(folder.name)})
     return sorted(result, key=lambda entry: entry["time"], reverse=True)
 
 
