@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import time
 
 import cuda_dlls  # keep before faster_whisper: it adds pip's CUDA DLLs to the search path
@@ -33,6 +34,12 @@ PROMPT_VERSION = 3
 REVIEW_PROMPT_VERSION = 1
 # Requests the review pass sends at once (REVIEW_WORKERS in .env).
 DEFAULT_REVIEW_WORKERS = 4
+# Seconds a chunk waits for its review, counted from when its draft is ready (REVIEW_TIMEOUT in
+# .env, 0 = no limit). After that the draft is used, so a slow or failing reviewer never holds up
+# the dub; the review is not saved, so a later run tries again.
+DEFAULT_REVIEW_TIMEOUT = 150
+# Reviews in a row that time out or fail before the review pass is switched off for this run.
+REVIEW_GIVE_UP_AFTER = 3
 # A corrected line may be at most this much longer than the draft: the dub has to fit the same time.
 REVIEW_MAX_GROWTH = 1.3
 # Translated segments from the end of the previous chunk shown as context.
@@ -441,6 +448,44 @@ def review_workers():
     return int(value)
 
 
+def review_timeout():
+    """REVIEW_TIMEOUT in seconds, or None for no limit."""
+    value = (os.getenv("REVIEW_TIMEOUT") or "").strip()
+    if not value:
+        return DEFAULT_REVIEW_TIMEOUT
+    if not value.isdigit():
+        raise ValueError(f"REVIEW_TIMEOUT must be a whole number of seconds (0 = no limit), got {value!r}")
+    return int(value) or None
+
+
+class ReviewTracker:
+    """Decides what happens to each review: use it, or give up and keep the draft.
+
+    A review that fails (server error, quota) or is not back `timeout` seconds after it was
+    submitted is dropped and the draft is used. After `give_up_after` such drops in a row, or
+    at once on a quota stop, the review pass is switched off for the rest of the run, so a
+    reviewer that is down costs a few minutes at most instead of stopping the job.
+    """
+
+    def __init__(self, timeout, give_up_after=REVIEW_GIVE_UP_AFTER, clock=time.monotonic):
+        self.timeout, self.give_up_after, self.clock = timeout, give_up_after, clock
+        self.failures_in_row = 0
+        self.off = False
+        self.kept_drafts = 0
+
+    def overdue(self, submitted):
+        return self.timeout is not None and self.clock() - submitted > self.timeout
+
+    def failed(self, quota=False):
+        self.kept_drafts += 1
+        self.failures_in_row += 1
+        if quota or self.failures_in_row >= self.give_up_after:
+            self.off = True
+
+    def succeeded(self):
+        self.failures_in_row = 0
+
+
 def build_review_prompt(chunk, draft):
     lines = "\n".join(
         f"{number}. {source['source_text']}  =>  {item['text']}"
@@ -736,6 +781,34 @@ def run_local_checks():
     del os.environ["REVIEW_WORKERS"]
     assert review_workers() == DEFAULT_REVIEW_WORKERS
 
+    # Review timeout and giving up: a slow or failing reviewer never stops the dub.
+    saved_timeout = os.environ.pop("REVIEW_TIMEOUT", None)  # .env may set it; put back below
+    assert review_timeout() == DEFAULT_REVIEW_TIMEOUT
+    os.environ["REVIEW_TIMEOUT"] = "0"
+    assert review_timeout() is None
+    os.environ["REVIEW_TIMEOUT"] = "soon"
+    try:
+        review_timeout()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("REVIEW_TIMEOUT=soon must be rejected")
+    del os.environ["REVIEW_TIMEOUT"]
+    if saved_timeout is not None:
+        os.environ["REVIEW_TIMEOUT"] = saved_timeout
+    now = [0.0]
+    tracker = ReviewTracker(10, give_up_after=3, clock=lambda: now[0])
+    assert not tracker.overdue(0.0)
+    now[0] = 10.5
+    assert tracker.overdue(0.0) and not ReviewTracker(None, clock=lambda: 1e9).overdue(0.0)
+    tracker.failed(); tracker.failed(); tracker.succeeded(); tracker.failed()
+    assert not tracker.off and tracker.kept_drafts == 3  # a success resets the count in a row
+    tracker.failed(); tracker.failed()
+    assert tracker.off
+    quota = ReviewTracker(10)
+    quota.failed(quota=True)
+    assert quota.off  # out of quota: no point asking again in this run
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -783,13 +856,16 @@ def main():
 
     reviewer = llm.describe(role="review") if llm.role_configured("review") else None
     pool = None
+    tracker = None
     if reviewer:
         llm.settings(role="review")  # a missing key stops here, not after the first chunk
         pool = ThreadPoolExecutor(max_workers=review_workers())
+        tracker = ReviewTracker(review_timeout())
     print(f"\n[3/3] Translating with {current}" + (f", checking with {reviewer}..." if reviewer else "..."))
     reused = 0
     ready = {}      # chunk index -> its final translation (reviewed when a review model is set)
-    pending = {}    # chunk index -> (future, draft, key) of a review that is still running
+    pending = {}    # chunk index -> (future, draft, key, submitted at) of a review still running
+    abandoned = []  # reviews given up while their request was still running
     published = 0   # chunks already written to final_segments, always a prefix
 
     def stop(error, what):
@@ -804,22 +880,46 @@ def main():
             f"{saved} saved translations; fix the problem and run the same command again."
         ) from error
 
+    def keep_draft(index, draft, reason, quota=False):
+        was_on = not tracker.off
+        tracker.failed(quota)
+        print(f"Chunk {index + 1}/{len(chunks)}: {reason}; keeping the draft translation", flush=True)
+        if was_on and tracker.off:
+            print(f"Review switched off for the rest of this run ({reviewer} is not answering); "
+                  "the remaining chunks keep their draft.", flush=True)
+        ready[index] = draft
+
     def collect(wait=False):
-        """Move finished reviews into `ready`; with wait=True, wait for all of them, oldest first."""
-        for index in sorted(pending):
-            future, draft, key = pending[index]
-            if not (wait or future.done()):
-                continue
-            try:
-                reviewed = future.result()
-            except (llm.QuotaExhausted, llm.LLMError, RuntimeError) as error:
-                stop(error, "review")
-            del pending[index]
-            changed = sum(a["text"] != b["text"] for a, b in zip(draft, reviewed))
-            print(f"Chunk {index + 1}/{len(chunks)}: review changed {changed} of {len(draft)} lines")
-            cache[key] = reviewed
-            write_json_atomic(CACHE_FILE, cache)
-            ready[index] = reviewed
+        """Move finished (or given-up) reviews into `ready`; with wait=True, until none is left."""
+        while True:
+            for index in sorted(pending):
+                future, draft, key, submitted = pending[index]
+                if not future.done():
+                    if tracker.overdue(submitted) or tracker.off:
+                        if not future.cancel():  # not started yet: never sent; running: its answer is ignored
+                            abandoned.append(future)
+                        del pending[index]
+                        keep_draft(index, draft, "review too slow" if not tracker.off else "review skipped")
+                    continue
+                del pending[index]
+                try:
+                    reviewed = future.result()
+                except llm.QuotaExhausted as error:
+                    keep_draft(index, draft, f"review quota reached ({str(error)[:100]})", quota=True)
+                    continue
+                except (llm.LLMError, RuntimeError) as error:
+                    keep_draft(index, draft, f"review failed ({str(error)[:100]})")
+                    continue
+                tracker.succeeded()
+                changed = sum(a["text"] != b["text"] for a, b in zip(draft, reviewed))
+                print(f"Chunk {index + 1}/{len(chunks)}: review changed {changed} of {len(draft)} lines")
+                cache[key] = reviewed
+                write_json_atomic(CACHE_FILE, cache)
+                ready[index] = reviewed
+            if not (wait and pending):
+                return
+            publish()  # chunks whose review is settled can already be read aloud
+            time.sleep(0.5)
 
     def publish():
         nonlocal published
@@ -870,8 +970,10 @@ def main():
                 key = review_key(chunk, translated, reviewer)
                 if key in cache and is_usable(cache[key], len(chunk)):
                     ready[index] = cache[key]
+                elif tracker.off:
+                    ready[index] = translated
                 else:
-                    pending[index] = (pool.submit(review_chunk, chunk, translated), translated, key)
+                    pending[index] = (pool.submit(review_chunk, chunk, translated), translated, key, time.monotonic())
                 collect()
             publish()
 
@@ -887,11 +989,20 @@ def main():
     if reused:
         print(f"\nKept {reused} chunks translated by an earlier model "
               "(--retranslate translates them again with the current one).")
+    if tracker and tracker.kept_drafts:
+        print(f"\n{tracker.kept_drafts} chunks kept their draft because the review failed or was too slow "
+              "(REVIEW_TIMEOUT); running the same command again reviews them.")
     print("\n--------------------------------")
     print("Pipeline complete.")
     print(f"Segments: {len(final_segments)}")
     print(f"Saved: {OUTPUT_FILE.name}")
     print("--------------------------------")
+    if any(not future.done() for future in abandoned):
+        # A review that was given up may still be waiting on the server (up to MAX_ATTEMPTS x
+        # REQUEST_TIMEOUT in llm.py), and Python waits for its thread before exiting. Everything
+        # is saved, so leave now instead of holding up the rest of the dub.
+        sys.stdout.flush()
+        os._exit(0)
 
 
 if __name__ == "__main__":
