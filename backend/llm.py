@@ -16,6 +16,10 @@ different LLMs; these override LLM_PROVIDER / LLM_MODEL for that job only:
 
     TRANSLATE_LLM_PROVIDER=...   TRANSLATE_LLM_MODEL=...
     FIT_LLM_PROVIDER=...         FIT_LLM_MODEL=...   (also used by speech.py)
+    REVIEW_LLM_PROVIDER=...      REVIEW_LLM_MODEL=...   (optional second pass over the translation, see pipeline.py;
+                                                         off while REVIEW_LLM_PROVIDER is empty)
+    TRANSLATE_LLM_REASONING=...  FIT_LLM_REASONING=...  REVIEW_LLM_REASONING=...
+        (e.g. "low" or "none": how hard a Groq / Gemini model may think; sent as reasoning_effort, empty = default)
 
 Shortening can also fall back to another LLM when its main one runs out of its
 daily limit (the rest of that run, and later runs, try the main LLM first again):
@@ -64,8 +68,9 @@ LOCAL_URLS = {
 }
 LOCAL_TIMEOUT = 600
 LOCAL_ATTEMPTS = 3
-# Settings that one job can override: translate = pipeline.py, fit = shortening.
-ROLE_PREFIXES = {"translate": "TRANSLATE_", "fit": "FIT_"}
+# Settings that one job can override: translate = pipeline.py, fit = shortening,
+# review = the optional second pass that checks the translation (off unless REVIEW_LLM_PROVIDER is set).
+ROLE_PREFIXES = {"translate": "TRANSLATE_", "fit": "FIT_", "review": "REVIEW_"}
 TEMPERATURE = 0.3
 MAX_ATTEMPTS = 6
 MAX_WAIT_SECONDS = 90  # a longer "try again in ..." is treated as an exhausted quota
@@ -134,7 +139,7 @@ def is_local(provider):
 def settings(provider=None, model=None, role=None):
     """Return (provider, model, api_key) from the arguments, then .env, then defaults.
 
-    `role` ("translate" or "fit") first looks at TRANSLATE_LLM_* / FIT_LLM_*.
+    `role` ("translate", "fit" or "review") first looks at TRANSLATE_LLM_* / FIT_LLM_* / REVIEW_LLM_*.
     A provider chosen without a model gets that provider's default model.
     Local providers need no key (api_key is LOCAL_LLM_API_KEY or "local").
     """
@@ -162,6 +167,19 @@ def settings(provider=None, model=None, role=None):
     if not key:
         raise RuntimeError(f"{KEY_NAMES[provider]} is missing from .env")
     return provider, model, key
+
+
+def role_configured(role):
+    """True when .env names an LLM for `role` of its own (REVIEW_LLM_PROVIDER=...)."""
+    prefix = ROLE_PREFIXES.get(role)
+    return bool(prefix and (os.getenv(f"{prefix}LLM_PROVIDER") or "").strip())
+
+
+def reasoning_setting(role):
+    """How hard the role's model may think ("low", "none"...), from {ROLE}_LLM_REASONING; None when unset."""
+    prefix = ROLE_PREFIXES.get(role)
+    value = (os.getenv(f"{prefix}LLM_REASONING") or "").strip().lower() if prefix else ""
+    return value or None
 
 
 def fallback_settings(role):
@@ -223,7 +241,7 @@ def max_tokens_setting():
     return int(value)
 
 
-def _groq(prompt, model, api_key, post, sleep):
+def _groq(prompt, model, api_key, post, sleep, reasoning=None):
     headers = {"Authorization": f"Bearer {api_key}"}
     body = {
         "model": model,
@@ -232,6 +250,8 @@ def _groq(prompt, model, api_key, post, sleep):
     }
     if max_tokens_setting():
         body["max_completion_tokens"] = max_tokens_setting()
+    if reasoning:
+        body["reasoning_effort"] = reasoning
     for attempt in range(1, MAX_ATTEMPTS + 1):
         last = attempt == MAX_ATTEMPTS
         try:
@@ -330,7 +350,7 @@ def gemini_error_info(response):
     return message, daily, wait
 
 
-def _gemini(prompt, model, api_key, post, sleep):
+def _gemini(prompt, model, api_key, post, sleep, reasoning=None):
     """Google AI Studio through its OpenAI-compatible endpoint.
 
     A per-minute limit (RPM, TPM) is waited out; a per-day limit stops the run
@@ -345,6 +365,8 @@ def _gemini(prompt, model, api_key, post, sleep):
     }
     if max_tokens_setting():
         body["max_tokens"] = max_tokens_setting()
+    if reasoning:
+        body["reasoning_effort"] = reasoning
     rpm = gemini_rpm()
     for attempt in range(1, MAX_ATTEMPTS + 1):
         last = attempt == MAX_ATTEMPTS
@@ -501,16 +523,18 @@ _switch_lock = threading.Lock()
 def generate(prompt, model=None, provider=None, role=None, post=httpx.post, sleep=time.sleep):
     """Send one prompt and return the answer text (reasoning blocks removed).
 
-    `role` ("translate" or "fit") picks that job's settings, see settings().
+    `role` ("translate", "fit" or "review") picks that job's settings, see settings().
+    {ROLE}_LLM_REASONING (e.g. REVIEW_LLM_REASONING=low) is sent to Groq and Gemini as reasoning_effort.
     When the role's main LLM is out of quota and it has a fallback (FIT_FALLBACK_*),
     this and every later call of the process use the fallback.
     """
     explicit = provider is not None or model is not None
     fallback = None if explicit else fallback_settings(role)
+    reasoning = None if explicit else reasoning_setting(role)
     if fallback and role in _switched:
-        return _generate_with(prompt, fallback, post, sleep)
+        return _generate_with(prompt, fallback, post, sleep, reasoning)
     try:
-        return _generate_with(prompt, settings(provider, model, role), post, sleep)
+        return _generate_with(prompt, settings(provider, model, role), post, sleep, reasoning)
     except QuotaExhausted as error:
         if not fallback:
             raise
@@ -519,17 +543,17 @@ def generate(prompt, model=None, provider=None, role=None, post=httpx.post, slee
                 _switched.add(role)
                 print(f"{describe(role=role)} is out of quota ({str(error)[:120]}). "
                       f"Switching to {fallback[0]}:{fallback[1]} for the rest of this run.", flush=True)
-        return _generate_with(prompt, fallback, post, sleep)
+        return _generate_with(prompt, fallback, post, sleep, reasoning)
 
 
-def _generate_with(prompt, chosen, post, sleep):
+def _generate_with(prompt, chosen, post, sleep, reasoning=None):
     chosen_provider, chosen_model, api_key = chosen
     if chosen_provider == "groq":
-        text = _groq(prompt, chosen_model, api_key, post, sleep)
+        text = _groq(prompt, chosen_model, api_key, post, sleep, reasoning)
     elif is_local(chosen_provider):
         text = _local(prompt, chosen_provider, chosen_model, api_key, post, sleep)
     else:
-        text = _gemini(prompt, chosen_model, api_key, post, sleep)
+        text = _gemini(prompt, chosen_model, api_key, post, sleep, reasoning)
     return strip_thinking(text)
 
 
@@ -615,6 +639,21 @@ def _check_roles_and_local():
     else:
         raise AssertionError("an unknown role must be rejected")
     for name in ("LLM_MODEL", "FIT_LLM_PROVIDER", "FIT_LLM_MODEL", "TRANSLATE_LLM_MODEL"):
+        os.environ.pop(name)
+
+    # The review role exists but is off until REVIEW_LLM_PROVIDER is set; reasoning is opt-in.
+    assert not role_configured("review") and not role_configured("tts") and reasoning_setting("review") is None
+    os.environ["REVIEW_LLM_PROVIDER"], os.environ["REVIEW_LLM_MODEL"] = "groq", "review-model"
+    os.environ["REVIEW_LLM_REASONING"] = " Low "
+    assert role_configured("review") and describe(role="review") == "groq:review-model"
+    assert reasoning_setting("review") == "low" and reasoning_setting("fit") is None
+    post = _scripted_post(_FakeResponse(200, "ok"))
+    assert generate("hi", role="review", post=post, sleep=sleeps.append) == "ok"
+    assert post.calls[0]["json"]["reasoning_effort"] == "low" and post.calls[0]["json"]["model"] == "review-model"
+    post = _scripted_post(_FakeResponse(200, "ok"))
+    generate("hi", role="translate", post=post, sleep=sleeps.append)
+    assert "reasoning_effort" not in post.calls[0]["json"]
+    for name in ("REVIEW_LLM_PROVIDER", "REVIEW_LLM_MODEL", "REVIEW_LLM_REASONING"):
         os.environ.pop(name)
 
     # Local: no key, Qwen3 told not to think, right URL, no quota logic.

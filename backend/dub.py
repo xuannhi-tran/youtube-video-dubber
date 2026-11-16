@@ -204,7 +204,9 @@ def preflight():
         problems.append(f"Python package missing: pip install {package}")
     if shutil.which("ffmpeg") is None:
         problems.append("ffmpeg was not found on PATH")
-    for role in ("translate", "fit"):
+    for role in ("translate", "fit", "review"):
+        if role == "review" and not llm.role_configured("review"):
+            continue  # the review pass is optional
         try:
             llm.settings(role=role)
         except (RuntimeError, ValueError) as error:
@@ -213,6 +215,9 @@ def preflight():
         problem = llm.check_local_server(role)
         if problem:
             problems.append(problem)
+    workers = os.getenv("REVIEW_WORKERS")
+    if workers and not (workers.isdigit() and 1 <= int(workers) <= 16):
+        problems.append(f"REVIEW_WORKERS must be a whole number from 1 to 16, got {workers!r} (backend/.env)")
     try:
         cleanup.read_level(os.getenv("CLEANUP"))
     except ValueError as error:
