@@ -143,8 +143,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 The voice (VieNeu) reads on the CPU by default, slightly slower than real time. With an NVIDIA GPU it is about 12 times faster per sentence (measured on an RTX 4060 Laptop: 4 to 5 s of audio in about 0.4 s instead of 4 to 5 s). In the project venv:
 
 ```
-pip install torch --index-url https://download.pytorch.org/whl/cu128
-pip install transformers safetensors
+pip install torch==2.11.0 transformers==5.23.0 safetensors --index-url https://download.pytorch.org/whl/cu128 --extra-index-url https://pypi.org/simple
 python tts_speed_test.py --only cuda     # should print "x real time" well above 1
 ```
 

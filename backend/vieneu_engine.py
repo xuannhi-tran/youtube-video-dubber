@@ -91,7 +91,9 @@ class Narrator:
         problem = device_problem()
         if problem:
             raise SystemExit(problem)
-        self.engine = Vieneu(device="cuda") if DEVICE == "cuda" else Vieneu()
+        # Always name the device: a bare Vieneu() would switch to the GPU by itself as soon as
+        # PyTorch with CUDA is installed, while MODEL (clip cache, calibration) still said "cpu".
+        self.engine = Vieneu(device=DEVICE)
         self.voice_id = find_voice(self.engine.list_preset_voices(), voice)
         self.sample_rate = self.engine.sample_rate
 
