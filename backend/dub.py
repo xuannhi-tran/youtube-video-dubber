@@ -218,6 +218,9 @@ def preflight():
     workers = os.getenv("REVIEW_WORKERS")
     if workers and not (workers.isdigit() and 1 <= int(workers) <= 16):
         problems.append(f"REVIEW_WORKERS must be a whole number from 1 to 16, got {workers!r} (backend/.env)")
+    timeout = (os.getenv("REVIEW_TIMEOUT") or "").strip()
+    if timeout and not timeout.isdigit():
+        problems.append(f"REVIEW_TIMEOUT must be a whole number of seconds (0 = no limit), got {timeout!r} (backend/.env)")
     try:
         cleanup.read_level(os.getenv("CLEANUP"))
     except ValueError as error:

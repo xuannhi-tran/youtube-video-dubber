@@ -145,6 +145,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `FIT_LLM_PROVIDER`, `FIT_LLM_MODEL` | Override them for shortening only (`fit_blocks.py` and `speech.py`). |
 | `REVIEW_LLM_PROVIDER`, `REVIEW_LLM_MODEL` | Optional second pass over the translation: this model reads the Chinese next to the draft and fixes only the lines that are wrong or sound word-for-word (see "Checking the translation" below). Off while `REVIEW_LLM_PROVIDER` is empty. |
 | `REVIEW_WORKERS` | Chunks the review pass checks at the same time (1 to 16, default 4). |
+| `REVIEW_TIMEOUT` | Seconds a chunk waits for its review before the draft is used (default 150, 0 = no limit). |
 | `TRANSLATE_LLM_REASONING`, `FIT_LLM_REASONING`, `REVIEW_LLM_REASONING` | How hard a Groq or Gemini model may think (`low`, `none`... sent as `reasoning_effort`). Empty keeps the model's default; a value the model does not know makes its requests fail, so remove it if you see errors. |
 | `FIT_FALLBACK_PROVIDER`, `FIT_FALLBACK_MODEL` | Shortening only: if the main LLM runs out of its daily quota, this one takes over for the rest of the run (e.g. `ollama` / `qwen3:8b`). Lines already shortened are kept. The next run tries the main LLM first again. Not available for translation. |
 | `LLM_MAX_TOKENS` | Cap on the answer length (some Groq models allow very little per minute). |
@@ -201,7 +202,7 @@ REVIEW_LLM_PROVIDER=gemini
 REVIEW_LLM_MODEL=gemma-4-31b-it
 ```
 
-For every chunk the review model gets the Chinese and the draft and answers with only the lines to change, so its answer is short. A fix is ignored if it is much longer than the draft, has Chinese characters or removes the last sentence end. Chunks are checked in parallel while the next ones are still being translated (`REVIEW_WORKERS`), and `translated_partial.json` only ever holds reviewed text. If the review model hits its daily quota the run stops like a translation quota does, and running it again continues; with an unusable answer the draft is kept. Reviews are saved in `translate_cache.json`, so running again costs nothing. To compare models on one chunk first, use `python compare_translators.py VIDEO_ID --provider gemini --models a,b`.
+For every chunk the review model gets the Chinese and the draft and answers with only the lines to change, so its answer is short. A fix is ignored if it is much longer than the draft, has Chinese characters or removes the last sentence end. Chunks are checked in parallel while the next ones are still being translated (`REVIEW_WORKERS`), and `translated_partial.json` only ever holds settled text (reviewed, or the draft when the review gave up). The review never stops the dub: a chunk whose review fails (server error, daily quota) or is not back within `REVIEW_TIMEOUT` seconds of its draft (default 150, 0 = no limit) keeps its draft. After 3 such chunks in a row, or at once on a daily quota, the review is switched off for the rest of the run. Drafts kept this way are not saved as reviewed, so running the same command again reviews them; with an unusable answer the draft is kept too. Reviews are saved in `translate_cache.json`, so running again costs nothing. To compare models on one chunk first, use `python compare_translators.py VIDEO_ID --provider gemini --models a,b`.
 
 
 ### Glossary
