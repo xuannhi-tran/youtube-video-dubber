@@ -143,6 +143,9 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `LLM_MODEL` | Model name; each provider has a default (`openai/gpt-oss-120b` for Groq, `gemini-3.5-flash-lite` for Gemini, `qwen3:8b` for Ollama). |
 | `TRANSLATE_LLM_PROVIDER`, `TRANSLATE_LLM_MODEL` | Override the two above for translation only. |
 | `FIT_LLM_PROVIDER`, `FIT_LLM_MODEL` | Override them for shortening only (`fit_blocks.py` and `speech.py`). |
+| `REVIEW_LLM_PROVIDER`, `REVIEW_LLM_MODEL` | Optional second pass over the translation: this model reads the Chinese next to the draft and fixes only the lines that are wrong or sound word-for-word (see "Checking the translation" below). Off while `REVIEW_LLM_PROVIDER` is empty. |
+| `REVIEW_WORKERS` | Chunks the review pass checks at the same time (1 to 16, default 4). |
+| `TRANSLATE_LLM_REASONING`, `FIT_LLM_REASONING`, `REVIEW_LLM_REASONING` | How hard a Groq or Gemini model may think (`low`, `none`... sent as `reasoning_effort`). Empty keeps the model's default; a value the model does not know makes its requests fail, so remove it if you see errors. |
 | `FIT_FALLBACK_PROVIDER`, `FIT_FALLBACK_MODEL` | Shortening only: if the main LLM runs out of its daily quota, this one takes over for the rest of the run (e.g. `ollama` / `qwen3:8b`). Lines already shortened are kept. The next run tries the main LLM first again. Not available for translation. |
 | `LLM_MAX_TOKENS` | Cap on the answer length (some Groq models allow very little per minute). |
 | `GROQ_API_URL` | Any OpenAI-compatible chat endpoint instead of Groq's. |
@@ -186,6 +189,20 @@ FIT_LLM_MODEL=openai/gpt-oss-120b
 ```
 
 with a local Ollama model as the fallback: for shortening, set `FIT_FALLBACK_PROVIDER=ollama` and `FIT_FALLBACK_MODEL=qwen3:8b` and it switches by itself when the main model hits its daily limit (Ollama must be running; `dub.py` warns at the start if it is not). Otherwise, if a stage stops on a daily limit, run again with `TRANSLATE_LLM_PROVIDER=ollama` (or `FIT_LLM_PROVIDER=ollama`); windows already translated by another model are kept. Gemini limits differ a lot between models and accounts (a lite model usually allows far more requests per minute and per day than a full one); check yours in AI Studio and pick the model accordingly. A per-minute limit is waited out automatically; a per-day limit stops the run with a message, keeping everything finished (the free tier resets at midnight Pacific time). Requests are spaced to `GEMINI_RPM`; translation and speech run as separate processes, so keep that in mind if both use Gemini.
+
+### Checking the translation
+
+A small, fast model (for example Gemini Flash Lite) is cheap but translates some lines word for word or gets the meaning wrong. A second model can check its draft without translating everything again:
+
+```
+TRANSLATE_LLM_PROVIDER=gemini
+TRANSLATE_LLM_MODEL=gemini-3.5-flash-lite
+REVIEW_LLM_PROVIDER=gemini
+REVIEW_LLM_MODEL=gemma-4-31b-it
+```
+
+For every chunk the review model gets the Chinese and the draft and answers with only the lines to change, so its answer is short. A fix is ignored if it is much longer than the draft, has Chinese characters or removes the last sentence end. Chunks are checked in parallel while the next ones are still being translated (`REVIEW_WORKERS`), and `translated_partial.json` only ever holds reviewed text. If the review model hits its daily quota the run stops like a translation quota does, and running it again continues; with an unusable answer the draft is kept. Reviews are saved in `translate_cache.json`, so running again costs nothing. To compare models on one chunk first, use `python compare_translators.py VIDEO_ID --provider gemini --models a,b`.
+
 
 ### Glossary
 

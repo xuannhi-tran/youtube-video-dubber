@@ -115,12 +115,15 @@ def main():
     # Both settings must be in place before pipeline and llm are imported.
     os.environ["DUB_WORKDIR"] = str(job)
     os.environ["LLM_PROVIDER"] = args.provider
-    os.environ.pop("TRANSLATE_LLM_PROVIDER", None)  # --provider wins over .env
-    os.environ.pop("TRANSLATE_LLM_MODEL", None)
     if args.max_tokens:
         os.environ["LLM_MAX_TOKENS"] = str(args.max_tokens)
     import llm
     import pipeline
+    # Importing llm reads .env, which would bring the TRANSLATE_* lines back: remove them only now,
+    # so that --provider wins over .env.
+    os.environ.pop("TRANSLATE_LLM_PROVIDER", None)
+    os.environ.pop("TRANSLATE_LLM_MODEL", None)
+    os.environ.pop("TRANSLATE_LLM_REASONING", None)
 
     segments = json.loads(raw_file.read_text(encoding="utf-8"))["segments"]
     chunks = pipeline.create_chunks(segments)

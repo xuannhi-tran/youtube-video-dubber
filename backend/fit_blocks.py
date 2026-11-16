@@ -184,7 +184,9 @@ Requirements:
   a voice-over reads it aloud in one go, so it must flow like one person talking.
 - Keep the connecting words ("vì vậy", "nhưng", "tức là"...) that carry the
   logic; join short clauses with commas instead of cutting them into pieces.
-- Use natural spoken Vietnamese suitable for a voice-over.
+- Use natural spoken Vietnamese suitable for a voice-over, not a word-for-word
+  rendering of the Chinese: no "của chúng ta" before a name, no chains of "của";
+  a historical figure or an older person is "ông" or "bà", never "anh ấy".
 - Use the limit well: aim for 80-100% of it, not far below.
 - No parentheses, quotation marks or symbols: everything is read aloud.
 - Do not invent facts that are not in the Chinese source.

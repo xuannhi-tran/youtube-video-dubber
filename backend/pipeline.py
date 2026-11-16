@@ -1,6 +1,8 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -26,7 +28,13 @@ ANSWER_ATTEMPTS = 3  # fresh requests when the answer is not usable JSON
 MODELS_ENTRY = "_models"
 # Part of every cache key: raise it when the translation prompt changes, so
 # chunks translated with an older prompt are translated again.
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
+# Same for the review pass (see review_chunk).
+REVIEW_PROMPT_VERSION = 1
+# Requests the review pass sends at once (REVIEW_WORKERS in .env).
+DEFAULT_REVIEW_WORKERS = 4
+# A corrected line may be at most this much longer than the draft: the dub has to fit the same time.
+REVIEW_MAX_GROWTH = 1.3
 # Translated segments from the end of the previous chunk shown as context.
 CONTEXT_SEGMENTS = 8
 
@@ -269,6 +277,14 @@ def check_translation(translated, expected):
             raise ChineseLeft(f"Chinese characters left in the translation: {CJK.search(item['text']).group(0)!r}")
 
 
+def is_usable(translated, count):
+    try:
+        check_translation(translated, count)
+    except ValueError:
+        return False
+    return True
+
+
 def context_lines(context):
     """The end of the previous chunk, as 'Chinese => Vietnamese' lines."""
     return "\n".join(f"{source} => {translation}" for source, translation in context)
@@ -325,6 +341,13 @@ How to translate:
   what was meant (a glossary term often is).
 - Do not invent facts when the transcript is uncertain.
 - Keep it concise: it will be spoken in the same time as the original.
+- Never translate word for word. Spoken Chinese has structures that sound foreign in
+  Vietnamese: "我们" in front of a name (我们天才尼采) is only familiar speech, so write
+  "thiên tài Nietzsche", never "của chúng ta"; avoid chains of "của" ("thiên tài của
+  Nietzsche" becomes "thiên tài Nietzsche" or "Nietzsche, một thiên tài"); leave out
+  pronouns and fillers Vietnamese does not need.
+- Call a historical figure, a thinker or an older person "ông" or "bà" (or by name);
+  "anh ấy" and "cô ấy" are for young people only.
 - Forms of address: the speaker talks to the audience as "bạn" or "chúng ta".
   Never call a person, a group of people or a personality type "nó"; use their
   name, "người này", "những người này" or "họ". Refer to the same person the
@@ -401,6 +424,121 @@ def translate_chunk(chunk, model=None, context=(), generate=None):
     return first + second
 
 
+
+# ---------------------------------------------------------
+# REVIEW (optional second pass)
+# ---------------------------------------------------------
+# A second model reads the Chinese next to the draft and returns ONLY the lines that
+# are wrong or sound like a word-for-word translation. Off unless REVIEW_LLM_PROVIDER is
+# set in .env; the draft stays whenever the review fails.
+
+def review_workers():
+    value = os.getenv("REVIEW_WORKERS")
+    if not value:
+        return DEFAULT_REVIEW_WORKERS
+    if not value.isdigit() or not 1 <= int(value) <= 16:
+        raise ValueError(f"REVIEW_WORKERS must be a whole number from 1 to 16, got {value!r}")
+    return int(value)
+
+
+def build_review_prompt(chunk, draft):
+    lines = "\n".join(
+        f"{number}. {source['source_text']}  =>  {item['text']}"
+        for number, (source, item) in enumerate(zip(chunk, draft), start=1)
+    )
+    glossary_lines = prompt_lines(GLOSSARY, chunk_source_text(chunk))
+    glossary_rule = (
+        f"- Glossary, keep these terms exactly as written where they appear:\n{glossary_lines}\n"
+        if glossary_lines else ""
+    )
+    return f"""
+You are the editor of a Chinese to Vietnamese video dub. Below are numbered lines:
+the Chinese original, then "=>", then a Vietnamese draft that a voice-over will read.
+The lines are consecutive pieces of ONE passage of speech, so a sentence can run over several lines.
+
+Fix only the lines that need it:
+- the meaning is wrong, missing or invented;
+- it reads like a word-for-word translation: 我们 + a name is just the name ("thiên tài
+  Nietzsche", never "của chúng ta"), chains of "của", a Chinese word order, filler pronouns;
+- a person is called "nó" or "anh ấy" where "ông", "bà", the name or "họ" is right
+  (historical figures, thinkers and older people are "ông" or "bà");
+- a Chinese name or term is written inconsistently.
+Leave every other line out of your answer. Do not polish lines that are already fine.
+
+Rules for a corrected line:
+- natural spoken Vietnamese, as short as the draft (never more than a third longer);
+- it keeps the line's place in the sentence: same split between lines, same . ? ! or comma at the end;
+- no Chinese characters, parentheses, quotation marks or symbols.
+{glossary_rule}
+Return ONLY a JSON array of the lines you fix, for example
+[{{"n": 3, "text": "corrected Vietnamese"}}]
+and [] if no line needs a change.
+
+{lines}
+"""
+
+
+def parse_review(answer, count):
+    """{line number (1-based): corrected text} from the model's answer; ValueError if it is not a list."""
+    corrections = {}
+    for item in extract_json_list(answer):
+        if not isinstance(item, dict):
+            continue
+        number = item.get("n", item.get("line"))
+        if isinstance(number, str) and number.strip().isdigit():
+            number = int(number)
+        text = next((item[key] for key in TEXT_KEYS if isinstance(item.get(key), str)), None)
+        if isinstance(number, int) and 1 <= number <= count and text and text.strip():
+            corrections[number] = " ".join(text.split())
+    return corrections
+
+
+def apply_review(draft, corrections):
+    """(reviewed translation, number of lines changed). A correction that is unusable is skipped."""
+    result = [dict(item) for item in draft]
+    changed = 0
+    for number, text in sorted(corrections.items()):
+        old = result[number - 1]["text"]
+        limit = max(len(old.split()) * REVIEW_MAX_GROWTH, len(old.split()) + 3)
+        if CJK.search(text) or text == old or len(text.split()) > limit:
+            continue
+        result[number - 1]["text"] = text
+        changed += 1
+    if changed:
+        try:
+            check_translation(result, len(draft))
+        except ValueError:
+            return [dict(item) for item in draft], 0
+    return result, changed
+
+
+def review_chunk(chunk, draft, generate=None):
+    """The draft with the model's corrections; the draft itself when the answer is unusable."""
+    generate = generate or (lambda text: llm.generate(text, role="review"))
+    prompt = build_review_prompt(chunk, draft)
+    for attempt in (1, 2):
+        request = prompt if attempt == 1 else prompt + (
+            "\n\nYour previous answer could not be read. Answer with ONLY a JSON array like "
+            '[{"n": 3, "text": "..."}], or [].')
+        try:
+            return apply_review(draft, parse_review(generate(request), len(draft)))[0]
+        except ValueError as error:
+            print(f"Review answer not usable ({error}). Attempt {attempt}/2")
+    print("Keeping the draft translation for this chunk.")
+    return draft
+
+
+def review_key(chunk, draft, model_name):
+    request = {
+        "review": model_name,
+        "chunk": chunk,
+        "draft": [item["text"] for item in draft],
+        "glossary": relevant(GLOSSARY, chunk_source_text(chunk)),
+        "prompt": REVIEW_PROMPT_VERSION,
+    }
+    return hashlib.sha256(json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------
@@ -445,12 +583,7 @@ def find_cached(cache, chunk, current, reuse_other_models=True):
     switching from Groq to a local model must not throw away finished work.
     """
     def usable(translated):
-        # A saved translation with Chinese left in it is translated again.
-        try:
-            check_translation(translated, len(chunk))
-        except ValueError:
-            return False
-        return True
+        return is_usable(translated, len(chunk))  # one with Chinese left in it is translated again
 
     key = chunk_key(chunk, current)
     if key in cache and usable(cache[key]):
@@ -574,6 +707,35 @@ def run_local_checks():
     other = [{"text": "z"}] * 3
     assert find_cached({chunk_key(chunk, "x:y"): other, MODELS_ENTRY: ["x:y"]}, chunk, current) == (other, "x:y")
 
+    # Review pass: only the lines the model names change, and only when the fix is usable.
+    draft = [{"text": "Thiên tài Nietzsche của chúng ta cũng từng nói"}, {"text": "mọi thứ do bạn."}, {"text": "Ông ấy rất giỏi."}]
+    assert parse_review('[{"n": 1, "text": "Thiên tài Nietzsche cũng từng nói"}, {"n": 9, "text": "x"}, "bad"]', 3) == {
+        1: "Thiên tài Nietzsche cũng từng nói"}
+    assert parse_review("[]", 3) == {} and parse_review('[{"n": "2", "translation": "ổn"}]', 3) == {2: "ổn"}
+    fixed, count = apply_review(draft, {1: "Thiên tài Nietzsche cũng từng nói", 2: "quá用力", 3: "Ông ấy rất giỏi."})
+    assert count == 1 and fixed[0]["text"] == "Thiên tài Nietzsche cũng từng nói" and fixed[1] == draft[1]
+    assert apply_review(draft, {3: "Ông ấy rất giỏi " + "nữa " * 9})[1] == 0  # far longer than the draft
+    sentences = [{"text": f"câu {i}."} for i in range(6)]
+    assert apply_review(sentences, {number: "chưa hết câu" for number in range(1, 7)}) == (sentences, 0)  # no sentence end left
+    assert draft[0]["text"].startswith("Thiên tài Nietzsche của")  # the draft itself is never edited
+    review_source = [{"start": float(i), "end": i + 1.0, "source_text": f"句{i}"} for i in range(3)]
+    assert "1. 句0  =>  Thiên tài" in build_review_prompt(review_source, draft)
+    replies = iter(["không phải JSON", '[{"n": 1, "text": "Thiên tài Nietzsche cũng từng nói"}]'])
+    assert review_chunk(review_source, draft, generate=lambda prompt: next(replies))[0]["text"] == "Thiên tài Nietzsche cũng từng nói"
+    assert review_chunk(review_source, draft, generate=lambda prompt: "xin lỗi") == draft
+    assert review_key(review_source, draft, "a:b") == review_key(review_source, draft, "a:b")
+    assert review_key(review_source, draft, "a:b") != review_key(review_source, draft, "c:d")
+    assert review_key(review_source, draft, "a:b") != review_key(review_source, draft[:2] + [{"text": "khác."}], "a:b")
+    os.environ["REVIEW_WORKERS"] = "0"
+    try:
+        review_workers()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("REVIEW_WORKERS=0 must be rejected")
+    del os.environ["REVIEW_WORKERS"]
+    assert review_workers() == DEFAULT_REVIEW_WORKERS
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -619,53 +781,105 @@ def main():
     write_json_atomic(PARTIAL_FILE, {"complete": False, "segments": []})
     current = llm.describe(role="translate")
 
-    print(f"\n[3/3] Translating with {current}...")
+    reviewer = llm.describe(role="review") if llm.role_configured("review") else None
+    pool = None
+    if reviewer:
+        llm.settings(role="review")  # a missing key stops here, not after the first chunk
+        pool = ThreadPoolExecutor(max_workers=review_workers())
+    print(f"\n[3/3] Translating with {current}" + (f", checking with {reviewer}..." if reviewer else "..."))
     reused = 0
+    ready = {}      # chunk index -> its final translation (reviewed when a review model is set)
+    pending = {}    # chunk index -> (future, draft, key) of a review that is still running
+    published = 0   # chunks already written to final_segments, always a prefix
 
-    for index, chunk in enumerate(chunks, start=1):
-        start = chunk[0]["start"]
-        end = chunk[-1]["end"]
-        translated, made_by = find_cached(cache, chunk, current, not args.retranslate)
+    def stop(error, what):
+        saved = sum(key != MODELS_ENTRY for key in cache)
+        if isinstance(error, llm.QuotaExhausted):
+            raise SystemExit(
+                f"\nQuota reached ({what}): {error}\n"
+                f"{saved} saved translations; run the same command later to continue."
+            ) from error
+        raise SystemExit(
+            f"\n{what.capitalize()} stopped: {error}\n"
+            f"{saved} saved translations; fix the problem and run the same command again."
+        ) from error
 
-        if translated is not None:
-            by = "" if made_by == current else f" by {made_by}"
-            reused += made_by != current
-            print(
-                f"Chunk {index}/{len(chunks)} "
-                f"({start:.2f}s -> {end:.2f}s): saved translation{by}"
-            )
-        else:
-            print(
-                f"Chunk {index}/{len(chunks)} "
-                f"({start:.2f}s -> {end:.2f}s)..."
-            )
-            saved = sum(key != MODELS_ENTRY for key in cache)
+    def collect(wait=False):
+        """Move finished reviews into `ready`; with wait=True, wait for all of them, oldest first."""
+        for index in sorted(pending):
+            future, draft, key = pending[index]
+            if not (wait or future.done()):
+                continue
             try:
-                translated = translate_chunk(chunk, context=context)
-            except llm.QuotaExhausted as error:
-                raise SystemExit(
-                    f"\nQuota reached: {error}\n"
-                    f"{saved} translated chunks are saved; run the same command later to continue."
-                ) from error
-            except (llm.LLMError, RuntimeError) as error:
-                raise SystemExit(
-                    f"\nTranslation stopped: {error}\n"
-                    f"{saved} translated chunks are saved; fix the problem and run the same command again."
-                ) from error
-            cache[chunk_key(chunk, current)] = translated
-            remember_model(cache, current)
+                reviewed = future.result()
+            except (llm.QuotaExhausted, llm.LLMError, RuntimeError) as error:
+                stop(error, "review")
+            del pending[index]
+            changed = sum(a["text"] != b["text"] for a, b in zip(draft, reviewed))
+            print(f"Chunk {index + 1}/{len(chunks)}: review changed {changed} of {len(draft)} lines")
+            cache[key] = reviewed
             write_json_atomic(CACHE_FILE, cache)
+            ready[index] = reviewed
 
-        for source, translation in zip(chunk, translated):
-            final_segments.append({
-                "start": source["start"],
-                "end": source["end"],
-                "source_text": source["source_text"],
-                "translated_text": translation["text"],
-            })
-        context = [(item["source_text"], item["translated_text"])
-                   for item in final_segments[-CONTEXT_SEGMENTS:]]
+    def publish():
+        nonlocal published
+        while published in ready:
+            chunk, translated = chunks[published], ready.pop(published)
+            for source, translation in zip(chunk, translated):
+                final_segments.append({
+                    "start": source["start"],
+                    "end": source["end"],
+                    "source_text": source["source_text"],
+                    "translated_text": translation["text"],
+                })
+            published += 1
         write_json_atomic(PARTIAL_FILE, {"complete": False, "segments": final_segments})
+
+    try:
+        for index, chunk in enumerate(chunks):
+            start = chunk[0]["start"]
+            end = chunk[-1]["end"]
+            translated, made_by = find_cached(cache, chunk, current, not args.retranslate)
+
+            if translated is not None:
+                by = "" if made_by == current else f" by {made_by}"
+                reused += made_by != current
+                print(
+                    f"Chunk {index + 1}/{len(chunks)} "
+                    f"({start:.2f}s -> {end:.2f}s): saved translation{by}"
+                )
+            else:
+                print(
+                    f"Chunk {index + 1}/{len(chunks)} "
+                    f"({start:.2f}s -> {end:.2f}s)..."
+                )
+                try:
+                    translated = translate_chunk(chunk, context=context)
+                except (llm.QuotaExhausted, llm.LLMError, RuntimeError) as error:
+                    stop(error, "translation")
+                cache[chunk_key(chunk, current)] = translated
+                remember_model(cache, current)
+                write_json_atomic(CACHE_FILE, cache)
+
+            # The next draft is translated with the previous drafts as context, so it never waits for a review.
+            context = (context + [(source["source_text"], item["text"]) for source, item in zip(chunk, translated)])[-CONTEXT_SEGMENTS:]
+
+            if not reviewer:
+                ready[index] = translated
+            else:
+                key = review_key(chunk, translated, reviewer)
+                if key in cache and is_usable(cache[key], len(chunk)):
+                    ready[index] = cache[key]
+                else:
+                    pending[index] = (pool.submit(review_chunk, chunk, translated), translated, key)
+                collect()
+            publish()
+
+        collect(wait=True)
+        publish()
+    finally:
+        if pool:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     write_json_atomic(OUTPUT_FILE, final_segments)
     write_json_atomic(PARTIAL_FILE, {"complete": True, "segments": final_segments})
