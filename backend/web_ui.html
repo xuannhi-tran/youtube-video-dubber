@@ -179,13 +179,18 @@ async function refresh() {
       const open = el("button", "ghost", "Xem"); open.onclick = () => { open.replaceWith(playerFor(v.video_id)); };
       const del = el("button", "ghost", "Xóa");
       del.onclick = async () => {
-        if (!confirm(`Xóa hẳn video ${v.video_id} và cả thư mục của nó (${((v.folder_size || v.size) / 1e6).toFixed(0)} MB)? Muốn có lại phải làm từ đầu.`)) return;
+        const after = v.exported ? `Bản chép ở ${v.exported} vẫn được giữ.` : "Video chưa được chép đi đâu: muốn có lại phải làm từ đầu.";
+        if (!confirm(`Xóa hẳn video ${v.video_id} và cả thư mục của nó trên máy (${((v.folder_size || v.size) / 1e6).toFixed(0)} MB)?\n\n${after}`)) return;
+        // An open player keeps the file busy on Windows, which would stop the folder from being deleted.
+        card.querySelectorAll("video").forEach(video => { video.pause(); video.removeAttribute("src"); video.load(); });
         const res = await fetch(`/api/videos/${encodeURIComponent(v.video_id)}/delete`, {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
         if (!res.ok) alert((await res.json()).error || "Không xóa được");
         refresh();
       };
       const buttons = el("div", "opts"); buttons.append(open, del);
-      row.append(buttons); card.append(row); list.append(card);
+      row.append(buttons); card.append(row);
+      if (v.exported) card.append(el("div", "note", `Đã chép sang thư mục đồng bộ: ${v.exported}`));
+      list.append(card);
     });
   }
 }
