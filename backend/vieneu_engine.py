@@ -16,7 +16,7 @@ import wave
 from dotenv import load_dotenv
 
 import hf_cache_fix  # keep before vieneu: it must set its env var before huggingface_hub loads
-from workdir import SCRIPT_DIR
+from workdir import SCRIPT_DIR, replace_file
 
 
 load_dotenv(SCRIPT_DIR / ".env")
@@ -152,7 +152,7 @@ class Narrator:
         temporary_file = audio_file.with_name(audio_file.stem + ".tmp.wav")
         self.engine.save(audio, temporary_file)
         duration = measure_wav(temporary_file)
-        temporary_file.replace(audio_file)
+        replace_file(temporary_file, audio_file)
         return duration
 
 
