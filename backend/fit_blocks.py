@@ -219,6 +219,60 @@ def fit_block(block, budget):
     return pick_best(attempts, budget)
 
 
+def review_fitted_block(block, budget):
+    """Polish an already-fitted line without allowing it to exceed its speech budget."""
+    from glossary import GLOSSARY, prompt_lines
+
+    current = block["translated_text"]
+    glossary_lines = prompt_lines(GLOSSARY, block["source_text"])
+    glossary_rule = (
+        f"\nTerms that must keep their written Vietnamese form:\n{glossary_lines}\n"
+        if glossary_lines else ""
+    )
+    prompt = f"""
+You are the final Vietnamese editor for a Chinese-language video voice-over.
+The Vietnamese below has already been shortened to fit a time slot. Check it
+against the Chinese and make it idiomatic, clear spoken Vietnamese.
+
+Fix mistranslations, likely speech-recognition errors that the context clearly
+resolves, wrong speaker or listener, awkward grammar, sentence fragments,
+duplicated meaning, and Chinese metaphors that sound unnatural if translated
+literally. For example, when "垃圾桶" describes friends listening to each
+other vent, say "người biết lắng nghe" or "chỗ trút bầu tâm sự", not "thùng rác".
+Do not invent information or change the speaker's intent. Preserve names and
+key details. Keep the result within {budget} space-separated Vietnamese words.
+Check clause punctuation carefully: never put a full stop before a lowercase
+continuation such as "sẽ khiến...". Keep a comma or no punctuation when the
+block ends in the middle of a sentence.
+If the current Vietnamese is already accurate and natural, return it unchanged.
+{glossary_rule}
+
+Return ONLY the final Vietnamese text, with no label or explanation.
+
+Chinese source:
+{block['source_text']}
+
+Current fitted Vietnamese ({word_count(current)} words; maximum {budget}):
+{current}
+"""
+    text = clean_rewrite(llm.generate(prompt, role="review"))
+    if not text or text == current:
+        return current
+    if re.search(r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]", text):
+        print(f"  [{block['block_id']:02d}] post-fit review left Chinese in the answer; keeping the fitted text")
+        return current
+    if not plausible_rewrite(text, budget):
+        print(f"  [{block['block_id']:02d}] post-fit review looked incomplete; keeping the fitted text")
+        return current
+    if word_count(text) < max(1, math.floor(word_count(current) * MIN_USEFUL_FRACTION)):
+        print(f"  [{block['block_id']:02d}] post-fit review dropped too much content; keeping the fitted text")
+        return current
+    if not within_budget(text, budget):
+        print(f"  [{block['block_id']:02d}] post-fit review exceeded {budget} words; keeping the fitted text")
+        return current
+    return text
+
+
 # ---------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------
