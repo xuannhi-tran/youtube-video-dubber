@@ -28,7 +28,7 @@ import threading
 import time
 
 import llm
-from workdir import SCRIPT_DIR
+from workdir import SCRIPT_DIR, replace_file
 
 
 JOBS_DIR = SCRIPT_DIR / "dub_jobs_output"  # matches "*_output/" in .gitignore
@@ -168,7 +168,7 @@ def save_state(job, state):
     path = job / STATE_FILE
     temporary_file = path.with_suffix(".json.tmp")
     temporary_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-    temporary_file.replace(path)
+    replace_file(temporary_file, path)
 
 
 # ---------------------------------------------------------

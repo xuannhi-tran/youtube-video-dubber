@@ -7,6 +7,7 @@ from pathlib import Path
 import wave
 
 from vieneu_engine import MODEL, VOICE, Narrator
+from workdir import replace_file
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -30,7 +31,7 @@ def write_json_atomic(path, data):
     temporary_file.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    temporary_file.replace(path)
+    replace_file(temporary_file, path)
 
 
 def make_result(segment, audio_file, duration, fingerprint):
