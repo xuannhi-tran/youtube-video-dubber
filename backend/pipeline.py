@@ -31,7 +31,10 @@ MODELS_ENTRY = "_models"
 # chunks translated with an older prompt are translated again.
 PROMPT_VERSION = 3
 # Same for the review pass (see review_chunk).
-REVIEW_PROMPT_VERSION = 1
+REVIEW_PROMPT_VERSION = 2
+# A review that changes more lines than this share of a chunk (and more than 3) is rewriting rather
+# than correcting; it is still used, but the log says so (see review_warning).
+REVIEW_WARN_SHARE = 0.25
 # Requests the review pass sends at once (REVIEW_WORKERS in .env).
 DEFAULT_REVIEW_WORKERS = 4
 # Seconds a chunk waits for its review, counted from when its draft is ready (REVIEW_TIMEOUT in
@@ -486,6 +489,14 @@ class ReviewTracker:
         self.failures_in_row = 0
 
 
+def review_warning(changed, count):
+    """A note for the log when a review changed suspiciously many lines, else ''."""
+    if changed > 3 and changed > count * REVIEW_WARN_SHARE:
+        return (f" (many: the reviewer rewrote {changed * 100 // count}% of this chunk; "
+                "if this happens often, it is polishing rather than fixing errors)")
+    return ""
+
+
 def build_review_prompt(chunk, draft):
     lines = "\n".join(
         f"{number}. {source['source_text']}  =>  {item['text']}"
@@ -501,14 +512,23 @@ You are the editor of a Chinese to Vietnamese video dub. Below are numbered line
 the Chinese original, then "=>", then a Vietnamese draft that a voice-over will read.
 The lines are consecutive pieces of ONE passage of speech, so a sentence can run over several lines.
 
-Fix only the lines that need it:
-- the meaning is wrong, missing or invented;
+The draft is usually good. Change a line ONLY when it has one of these clear errors:
+- the meaning is wrong, missing or invented compared with the Chinese;
 - it reads like a word-for-word translation: 我们 + a name is just the name ("thiên tài
-  Nietzsche", never "của chúng ta"), chains of "của", a Chinese word order, filler pronouns;
-- a person is called "nó" or "anh ấy" where "ông", "bà", the name or "họ" is right
-  (historical figures, thinkers and older people are "ông" or "bà");
+  Nietzsche", never "của chúng ta"), chains of "của", a Chinese word order;
+- a SPECIFIC person (named, or clearly the same person as in the lines around it) is called
+  "nó" or "anh ấy" where "ông", "bà", the name or "họ" is right (historical figures, thinkers
+  and older people are "ông" or "bà");
+- it is said to the wrong person: who says what to whom must match the Chinese
+  (the speaker "tôi", the audience "bạn"/"chúng ta", other people "họ");
 - a Chinese name or term is written inconsistently.
-Leave every other line out of your answer. Do not polish lines that are already fine.
+Do NOT change a line because another wording sounds a little better: a draft that is
+correct and natural stays as it is. Most passages need 0 to 3 changes.
+Do NOT add a pronoun or a person ("ông", "bà", "anh", "chị", "họ") that the Chinese line
+does not have: a general statement about "a person", "someone" or "people" stays general.
+Do NOT replace the key words of the topic with milder or vaguer ones (if the speaker says
+"bệnh", keep "bệnh").
+Leave every line you do not change out of your answer.
 
 Rules for a corrected line:
 - natural spoken Vietnamese, as short as the draft (never more than a third longer);
@@ -783,6 +803,8 @@ def run_local_checks():
     assert draft[0]["text"].startswith("Thiên tài Nietzsche của")  # the draft itself is never edited
     review_source = [{"start": float(i), "end": i + 1.0, "source_text": f"句{i}"} for i in range(3)]
     assert "1. 句0  =>  Thiên tài" in build_review_prompt(review_source, draft)
+    assert review_warning(2, 15) == "" and review_warning(3, 4) == ""  # a few fixes, or a tiny chunk
+    assert "40%" in review_warning(6, 15)
     replies = iter(["không phải JSON", '[{"n": 1, "text": "Thiên tài Nietzsche cũng từng nói"}]'])
     assert review_chunk(review_source, draft, generate=lambda prompt: next(replies))[0]["text"] == "Thiên tài Nietzsche cũng từng nói"
     assert review_chunk(review_source, draft, generate=lambda prompt: "xin lỗi") == draft
@@ -930,7 +952,8 @@ def main():
                     continue
                 tracker.succeeded()
                 changed = sum(a["text"] != b["text"] for a, b in zip(draft, reviewed))
-                print(f"Chunk {index + 1}/{len(chunks)}: review changed {changed} of {len(draft)} lines")
+                print(f"Chunk {index + 1}/{len(chunks)}: review changed {changed} of {len(draft)} lines"
+                      + review_warning(changed, len(draft)))
                 cache[key] = reviewed
                 write_json_atomic(CACHE_FILE, cache)
                 ready[index] = reviewed
