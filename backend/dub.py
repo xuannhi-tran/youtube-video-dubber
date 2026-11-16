@@ -6,6 +6,7 @@
     python dub.py URL --glossary-only      # prepare the job folder, then stop
     python dub.py URL --original-volume 0.04   # mix the original voice lower (0 = drop it); redoes only the last stage
     python dub.py URL --subs               # burn Vietnamese subtitles into a black bar under the video
+    python dub.py URL --cleanup clips      # afterwards delete the voice clips and audio (or set CLEANUP in .env)
 
 Each video gets its own folder, dub_jobs_output/<video id>/, and the result is
 dub_jobs_output/<video id>/dub_output/dubbed.mp4. Finished stages are skipped on
@@ -27,6 +28,7 @@ import sys
 import threading
 import time
 
+import cleanup
 import llm
 from workdir import SCRIPT_DIR, replace_file
 
@@ -143,6 +145,25 @@ def run_local_checks():
     assert stage_to_redo(loud, STAGE_NAMES, False) == "assemble"
     assert stage_to_redo(argparse.Namespace(**{**quiet, "original_volume": 0.1}), STAGE_NAMES, False) == "mux"
     assert stage_to_redo(argparse.Namespace(**{**quiet, "subs": True, "redo": "speech"}), STAGE_NAMES, True) == "speech"
+    import tempfile
+    with tempfile.TemporaryDirectory() as folder:
+        job = Path(folder)
+        every = ["download", "transcribe", "speech", "assemble"]
+        assert stage_for_missing_files(job, every + ["mux"]) is None
+        results = job / "block_tts_duration_results_fitted.json"
+        (job / "block_tts_output").mkdir()
+        (job / "block_tts_output" / "block_001.wav").write_bytes(b"x")
+        results.write_text(json.dumps([{"audio_file": "block_tts_output/block_001.wav"}]))
+        assert clips_present(job)
+        assert stage_for_missing_files(job, every) == "assemble"      # no dub_track, clips exist
+        (job / "block_tts_output" / "block_001.wav").unlink()
+        assert not clips_present(job)
+        assert stage_for_missing_files(job, every) == "speech"        # nothing left: read the voice again
+        assert stage_for_missing_files(job, every[:3]) == "speech"    # assemble pending, no clips
+        (job / "dub_output").mkdir()
+        (job / "dub_output" / "dub_track.wav").write_bytes(b"x")
+        assert stage_for_missing_files(job, every) is None            # track present: mux alone is enough
+        assert stage_for_missing_files(job, every[:2]) is None        # speech not done: nothing to restore
     assert missing_modules(lambda module: module != "vieneu") == ["vieneu"]
     assert missing_modules(lambda module: True) == []
 
@@ -190,6 +211,10 @@ def preflight():
         problem = llm.check_local_server(role)
         if problem:
             problems.append(problem)
+    try:
+        cleanup.read_level(os.getenv("CLEANUP"))
+    except ValueError as error:
+        problems.append(f"{error} (backend/.env)")
     try:
         import vieneu_engine  # reads TTS_DEVICE; does not load the voice model
         problem = vieneu_engine.device_problem()
@@ -363,6 +388,37 @@ def stage_to_redo(args, done, has_timeline):
     return None
 
 
+def clips_present(job):
+    """True when every voice clip listed in the results file is still on disk."""
+    rows = read_json_file(job / "block_tts_duration_results_fitted.json")
+    if not isinstance(rows, list) or not rows:
+        return False
+    return all(isinstance(row, dict) and (job / str(row.get("audio_file", ""))).is_file() for row in rows)
+
+
+def read_json_file(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def stage_for_missing_files(job, done):
+    """Stage to rewind to when a later stage must run but CLEANUP removed what it reads.
+
+    Only the voice (speech stage) is read again, from the saved translation and shortened
+    text; nothing is translated or shortened again. None when nothing is missing.
+    """
+    if "mux" in done:
+        return None
+    clips = clips_present(job)
+    if "assemble" in done and not (job / "dub_output" / "dub_track.wav").is_file():
+        return "assemble" if clips else "speech"
+    if "assemble" not in done and "speech" in done and not clips:
+        return "speech"
+    return None
+
+
 def stage_actions(url, job, args):
     return {
         "download": lambda: download(url, job, args.max_height),
@@ -399,6 +455,9 @@ def parse_args():
                         help="subtitle size in pixels of the video (default: automatic, or SUB_FONT_SIZE)")
     parser.add_argument("--sub-bar", type=int, default=None,
                         help="height of the black bar in pixels (default: automatic, or SUB_BAR)")
+    parser.add_argument("--cleanup", choices=cleanup.LEVELS, default=None,
+                        help="after the video is made: clips = delete the voice clips and audio files, all = also "
+                             "the source video and dub track (default: CLEANUP in .env, else none)")
     parser.add_argument("--glossary-only", action="store_true",
                         help="create the job folder and glossary.json, then stop")
     args = parser.parse_args()
@@ -435,7 +494,15 @@ def main():
     redo = stage_to_redo(args, state["done"], (job / "dub_output" / "dub_timeline.json").is_file())
     if redo:
         state["done"] = forget_from(state["done"], redo)
+    missing = stage_for_missing_files(job, state["done"])
+    if missing:
+        print(f"Files from an earlier CLEANUP are missing: redoing the {missing} stage "
+              "(no translation or shortening is repeated)")
+        state["done"] = forget_from(state["done"], missing)
     save_state(job, state)
+    if "mux" not in state["done"] and not (job / "source.mp4").is_file() and (job / "transcript_raw.json").is_file():
+        print("The source video was removed by CLEANUP: downloading it again")
+        download(args.url, job, args.max_height)
 
     def finish(name):
         state["done"].append(name)
@@ -462,6 +529,10 @@ def main():
         finish(name)
 
     result = job / "dub_output" / "dubbed.mp4"
+    level = args.cleanup or cleanup.read_level(os.getenv("CLEANUP"))
+    freed = cleanup.clean_job(job, level)
+    if freed:
+        print(f"\nCleanup ({level}): freed {cleanup.megabytes(freed)}")
     print("\n================================")
     print(f"Done: {result}")
     print("================================")
