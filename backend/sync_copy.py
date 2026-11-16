@@ -1,6 +1,6 @@
 """Copy finished videos to another folder, e.g. one that Google Drive / OneDrive uploads.
 
-    EXPORT_DIR=D:\\Google Drive\\Dubbed   # in backend/.env: every finished dubbed.mp4 is copied
+    EXPORT_DIR=C:\\Users\\you\\Google Drive\\Dubbed   # in backend/.env: every finished dubbed.mp4 is copied
                                          # there as <video id>.mp4 when its job ends
     python sync_copy.py                  # copy the finished videos already on disk (skips copies
                                          # that are already there)

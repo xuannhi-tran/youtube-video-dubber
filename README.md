@@ -69,7 +69,7 @@ python cleanup.py JOB_ID --level clips       # clean a finished job by hand (--a
 - `all` also deletes the source video and the dub track: only `dubbed.mp4`, the translation and small files stay. If you ask for something later (`--subs`, `--original-volume`, `--redo`), `dub.py` downloads the video again and reads the voice again from the saved text; it never translates or shortens again.
 - Nothing is removed unless the video was finished (`dubbed.mp4` exists).
 - On the web page every finished video has a "Xóa" button that deletes its whole folder after a confirmation (not while that video is being made). The list also shows the size of the whole folder.
-- `EXPORT_DIR=D:\Google Drive\Dubbed` (the folder must exist) copies every finished `dubbed.mp4` there as `<video id>.mp4` when its job ends. Point it at a folder that a sync app (Google Drive for desktop, OneDrive, Dropbox) uploads and the video is in the cloud with no extra step; the job folder can then be cleaned or deleted, the copy stays (the web page says which videos have one). `python sync_copy.py` copies the videos that were finished before you set it.
+- `EXPORT_DIR=C:\Users\you\Google Drive\Dubbed` (the folder must exist) copies every finished `dubbed.mp4` there as `<video id>.mp4` when its job ends. Point it at a folder that a sync app (Google Drive for desktop, OneDrive, Dropbox) uploads and the video is in the cloud with no extra step; the job folder can then be cleaned or deleted, the copy stays (the web page says which videos have one). `python sync_copy.py` copies the videos that were finished before you set it.
 
 ### Redoing a stage
 
@@ -241,7 +241,7 @@ ollama pull qwen2.5:7b-instruct  # alternative
 ollama list                      # check it is there
 ```
 
-To keep models on another drive, set `OLLAMA_MODELS` (e.g. `setx OLLAMA_MODELS "D:\ollama\models"`), restart Ollama and open a new terminal before pulling.
+To keep models on another drive, set `OLLAMA_MODELS` (e.g. `setx OLLAMA_MODELS "C:\ollama\models"`), restart Ollama and open a new terminal before pulling.
 
 Both are Q4 builds that fit an 8 GB GPU. Whisper also uses the GPU, but only at the start, and Ollama unloads its model after a few idle minutes, so the stages mostly take turns. If you run out of VRAM, pick a smaller model such as `qwen3:4b`.
 
