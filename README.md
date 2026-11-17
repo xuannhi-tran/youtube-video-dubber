@@ -77,6 +77,10 @@ It runs `dub.py` for you, so everything above applies (resume after an error: pa
 
 ## How it works
 
+![Pipeline: download, transcribe, video brief, translate, review, fit to timing, post-fit review, text-to-speech, assemble, mux](docs/architecture.png)
+
+(Vector version: [docs/architecture.svg](docs/architecture.svg).)
+
 `dub.py` runs five stages for one video. Each video gets its own folder, `backend/dub_jobs_output/<video id>/`, so jobs never mix. Finished stages are skipped on a re-run, so after an interruption (a quota limit, a crash, Ctrl+C) you run the same command and it continues.
 
 ```

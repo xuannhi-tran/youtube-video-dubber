@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" xmlns:c2pa="http://c2pa.org/manifest">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1020"/><stop offset="1" stop-color="#111a33"/></linearGradient>
+<radialGradient id="glow1" cx="0.15" cy="0.05" r="0.6"><stop offset="0" stop-color="#6366f1" stop-opacity="0.22"/><stop offset="1" stop-color="#6366f1" stop-opacity="0"/></radialGradient>
+<radialGradient id="glow2" cx="0.95" cy="1" r="0.6"><stop offset="0" stop-color="#10b981" stop-opacity="0.16"/><stop offset="1" stop-color="#10b981" stop-opacity="0"/></radialGradient>
+<linearGradient id="title" x1="0" x2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#c7d2fe"/></linearGradient>
+<linearGradient id="out" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e1b4b"/><stop offset="1" stop-color="#064e3b"/></linearGradient>
+<marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker>
+<filter id="sh" x="-10%" y="-10%" width="120%" height="140%"><feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000" flood-opacity="0.35"/></filter>
+</defs>
+<rect width="1600" height="1040" fill="url(#bg)"/><rect width="1600" height="1040" fill="url(#glow1)"/><rect width="1600" height="1040" fill="url(#glow2)"/>
+<text x="60" y="92" font-size="50" font-weight="800" fill="url(#title)" letter-spacing="-1">YouTube Video Dubber</text>
+<text x="60" y="136" font-size="23" font-weight="500" fill="#94a3b8">AI pipeline that turns a Chinese video into a Vietnamese voice-over — fully automated</text>
+<rect x="1027.0" y="66" width="191.0" height="38" rx="19" fill="#38bdf8" fill-opacity="0.12" stroke="#38bdf8" stroke-opacity="0.5"/>
+<circle cx="1047.0" cy="85" r="6" fill="#38bdf8"/>
+<text x="1061.0" y="92" font-size="18" font-weight="600" fill="#e2e8f0">Media / FFmpeg</text>
+<rect x="1230.0" y="66" width="128.0" height="38" rx="19" fill="#a78bfa" fill-opacity="0.12" stroke="#a78bfa" stroke-opacity="0.5"/>
+<circle cx="1250.0" cy="85" r="6" fill="#a78bfa"/>
+<text x="1264.0" y="92" font-size="18" font-weight="600" fill="#e2e8f0">LLM step</text>
+<rect x="1370.0" y="66" width="170.0" height="38" rx="19" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-opacity="0.5"/>
+<circle cx="1390.0" cy="85" r="6" fill="#34d399"/>
+<text x="1404.0" y="92" font-size="18" font-weight="600" fill="#e2e8f0">Speech audio</text>
+<rect x="42.0" y="416" width="1134.3333333333335" height="240" rx="22" fill="#34d399" fill-opacity="0.04" stroke="#34d399" stroke-opacity="0.55" stroke-width="2" stroke-dasharray="8 7"/>
+<text x="64.0" y="449" font-size="18" fill="#a7f3d0"><tspan font-weight="800" fill="#6ee7b7" letter-spacing="1">SPEECH STAGE</tspan><tspan dx="12" font-weight="500">streams block by block: voicing starts while translation is still running</tspan></text>
+<line x1="403.0" y1="276.0" x2="431.6666666666667" y2="276.0" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#ah)"/>
+<line x1="784.6666666666667" y1="276.0" x2="813.3333333333334" y2="276.0" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#ah)"/>
+<line x1="1166.3333333333335" y1="276.0" x2="1195.0" y2="276.0" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#ah)"/>
+<line x1="1197.0" y1="552.0" x2="1168.3333333333335" y2="552.0" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#ah)"/>
+<line x1="815.3333333333334" y1="552.0" x2="786.6666666666667" y2="552.0" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#ah)"/>
+<line x1="433.6666666666667" y1="552.0" x2="405.0" y2="552.0" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#ah)"/>
+<line x1="1372.5" y1="370" x2="1372.5" y2="456" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#ah)"/>
+<line x1="227.5" y1="664" x2="227.5" y2="730" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#ah)"/>
+<line x1="403.0" y1="826.0" x2="431.6666666666667" y2="826.0" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#ah)"/>
+<line x1="784.6666666666667" y1="826.0" x2="813.3333333333334" y2="826.0" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#ah)"/>
+<g filter="url(#sh)"><rect x="60.0" y="190" width="335" height="172" rx="18" fill="#151d35" stroke="#2a3557" stroke-width="1.5"/></g>
+<rect x="60.0" y="190" width="335" height="6" rx="3" fill="#38bdf8"/>
+<circle cx="100.0" cy="240" r="21" fill="#38bdf8" fill-opacity="0.16" stroke="#38bdf8" stroke-width="2"/>
+<text x="100.0" y="247.5" font-size="20" font-weight="800" fill="#38bdf8" text-anchor="middle">1</text>
+<text x="134.0" y="249" font-size="26" font-weight="700" fill="#f8fafc">Download</text>
+<text x="84.0" y="298" font-size="18.5" font-weight="600" fill="#cbd5e1">yt-dlp · FFmpeg</text>
+<text x="84.0" y="330" font-size="17.5" font-weight="400" fill="#8b9abb">audio + title, description, channel</text>
+<g filter="url(#sh)"><rect x="441.6666666666667" y="190" width="335" height="172" rx="18" fill="#151d35" stroke="#2a3557" stroke-width="1.5"/></g>
+<rect x="441.6666666666667" y="190" width="335" height="6" rx="3" fill="#38bdf8"/>
+<circle cx="481.6666666666667" cy="240" r="21" fill="#38bdf8" fill-opacity="0.16" stroke="#38bdf8" stroke-width="2"/>
+<text x="481.6666666666667" y="247.5" font-size="20" font-weight="800" fill="#38bdf8" text-anchor="middle">2</text>
+<text x="515.6666666666667" y="249" font-size="26" font-weight="700" fill="#f8fafc">Transcribe</text>
+<text x="465.6666666666667" y="298" font-size="18.5" font-weight="600" fill="#cbd5e1">Whisper large-v3 · GPU</text>
+<text x="465.6666666666667" y="330" font-size="17.5" font-weight="400" fill="#8b9abb">video title used as a prompt hint</text>
+<g filter="url(#sh)"><rect x="823.3333333333334" y="190" width="335" height="172" rx="18" fill="#151d35" stroke="#2a3557" stroke-width="1.5"/></g>
+<rect x="823.3333333333334" y="190" width="335" height="6" rx="3" fill="#a78bfa"/>
+<circle cx="863.3333333333334" cy="240" r="21" fill="#a78bfa" fill-opacity="0.16" stroke="#a78bfa" stroke-width="2"/>
+<text x="863.3333333333334" y="247.5" font-size="20" font-weight="800" fill="#a78bfa" text-anchor="middle">3</text>
+<text x="897.3333333333334" y="249" font-size="22.5" font-weight="700" fill="#f8fafc">Video brief &amp; glossary</text>
+<text x="847.3333333333334" y="298" font-size="18.5" font-weight="600" fill="#cbd5e1">summary · speaker · address</text>
+<text x="847.3333333333334" y="330" font-size="17.5" font-weight="400" fill="#8b9abb">terms + Whisper mishearing fixes</text>
+<g filter="url(#sh)"><rect x="1205.0" y="190" width="335" height="172" rx="18" fill="#151d35" stroke="#2a3557" stroke-width="1.5"/></g>
+<rect x="1205.0" y="190" width="335" height="6" rx="3" fill="#a78bfa"/>
+<circle cx="1245.0" cy="240" r="21" fill="#a78bfa" fill-opacity="0.16" stroke="#a78bfa" stroke-width="2"/>
+<text x="1245.0" y="247.5" font-size="20" font-weight="800" fill="#a78bfa" text-anchor="middle">4</text>
+<text x="1279.0" y="249" font-size="26" font-weight="700" fill="#f8fafc">Translate</text>
+<text x="1229.0" y="298" font-size="18.5" font-weight="600" fill="#cbd5e1">Chinese → Vietnamese, in chunks</text>
+<text x="1229.0" y="330" font-size="17.5" font-weight="400" fill="#8b9abb">neighbouring lines as context</text>
+<g filter="url(#sh)"><rect x="1205.0" y="466" width="335" height="172" rx="18" fill="#151d35" stroke="#2a3557" stroke-width="1.5"/></g>
+<rect x="1205.0" y="466" width="335" height="6" rx="3" fill="#a78bfa"/>
+<circle cx="1245.0" cy="516" r="21" fill="#a78bfa" fill-opacity="0.16" stroke="#a78bfa" stroke-width="2"/>
+<text x="1245.0" y="523.5" font-size="20" font-weight="800" fill="#a78bfa" text-anchor="middle">5</text>
+<text x="1279.0" y="525" font-size="26" font-weight="700" fill="#f8fafc">Review</text>
+<text x="1229.0" y="574" font-size="18.5" font-weight="600" fill="#cbd5e1">LLM checks draft vs. Chinese</text>
+<text x="1229.0" y="606" font-size="17.5" font-weight="400" fill="#8b9abb">fixes omissions &amp; literal phrasing</text>
+<g filter="url(#sh)"><rect x="823.3333333333334" y="466" width="335" height="172" rx="18" fill="#151d35" stroke="#2a3557" stroke-width="1.5"/></g>
+<rect x="823.3333333333334" y="466" width="335" height="6" rx="3" fill="#a78bfa"/>
+<circle cx="863.3333333333334" cy="516" r="21" fill="#a78bfa" fill-opacity="0.16" stroke="#a78bfa" stroke-width="2"/>
+<text x="863.3333333333334" y="523.5" font-size="20" font-weight="800" fill="#a78bfa" text-anchor="middle">6</text>
+<text x="897.3333333333334" y="525" font-size="26" font-weight="700" fill="#f8fafc">Fit to timing</text>
+<text x="847.3333333333334" y="574" font-size="18.5" font-weight="600" fill="#cbd5e1">block builder + LLM shortener</text>
+<text x="847.3333333333334" y="606" font-size="17.5" font-weight="400" fill="#8b9abb">predicted length vs. time slot</text>
+<g filter="url(#sh)"><rect x="441.6666666666667" y="466" width="335" height="172" rx="18" fill="#151d35" stroke="#2a3557" stroke-width="1.5"/></g>
+<rect x="441.6666666666667" y="466" width="335" height="6" rx="3" fill="#a78bfa"/>
+<circle cx="481.6666666666667" cy="516" r="21" fill="#a78bfa" fill-opacity="0.16" stroke="#a78bfa" stroke-width="2"/>
+<text x="481.6666666666667" y="523.5" font-size="20" font-weight="800" fill="#a78bfa" text-anchor="middle">7</text>
+<text x="515.6666666666667" y="525" font-size="26" font-weight="700" fill="#f8fafc">Post-fit review</text>
+<text x="465.6666666666667" y="574" font-size="18.5" font-weight="600" fill="#cbd5e1">shortened text vs. Chinese again</text>
+<text x="465.6666666666667" y="606" font-size="17.5" font-weight="400" fill="#8b9abb">meaning and word budget kept</text>
+<g filter="url(#sh)"><rect x="60.0" y="466" width="335" height="172" rx="18" fill="#151d35" stroke="#2a3557" stroke-width="1.5"/></g>
+<rect x="60.0" y="466" width="335" height="6" rx="3" fill="#34d399"/>
+<circle cx="100.0" cy="516" r="21" fill="#34d399" fill-opacity="0.16" stroke="#34d399" stroke-width="2"/>
+<text x="100.0" y="523.5" font-size="20" font-weight="800" fill="#34d399" text-anchor="middle">8</text>
+<text x="134.0" y="525" font-size="26" font-weight="700" fill="#f8fafc">Text-to-speech</text>
+<text x="84.0" y="574" font-size="18.5" font-weight="600" fill="#cbd5e1">VieNeu TTS · Vietnamese voice</text>
+<text x="84.0" y="606" font-size="17.5" font-weight="400" fill="#8b9abb">CPU or batched GPU inference</text>
+<g filter="url(#sh)"><rect x="60.0" y="740" width="335" height="172" rx="18" fill="#151d35" stroke="#2a3557" stroke-width="1.5"/></g>
+<rect x="60.0" y="740" width="335" height="6" rx="3" fill="#34d399"/>
+<circle cx="100.0" cy="790" r="21" fill="#34d399" fill-opacity="0.16" stroke="#34d399" stroke-width="2"/>
+<text x="100.0" y="797.5" font-size="20" font-weight="800" fill="#34d399" text-anchor="middle">9</text>
+<text x="134.0" y="799" font-size="26" font-weight="700" fill="#f8fafc">Assemble</text>
+<text x="84.0" y="848" font-size="18.5" font-weight="600" fill="#cbd5e1">synced to the original timeline</text>
+<text x="84.0" y="880" font-size="17.5" font-weight="400" fill="#8b9abb">≤ 1.3× speed · −20 dBFS speech</text>
+<g filter="url(#sh)"><rect x="441.6666666666667" y="740" width="335" height="172" rx="18" fill="#151d35" stroke="#2a3557" stroke-width="1.5"/></g>
+<rect x="441.6666666666667" y="740" width="335" height="6" rx="3" fill="#38bdf8"/>
+<circle cx="481.6666666666667" cy="790" r="21" fill="#38bdf8" fill-opacity="0.16" stroke="#38bdf8" stroke-width="2"/>
+<text x="481.6666666666667" y="797.5" font-size="20" font-weight="800" fill="#38bdf8" text-anchor="middle">10</text>
+<text x="515.6666666666667" y="799" font-size="26" font-weight="700" fill="#f8fafc">Mux &amp; export</text>
+<text x="465.6666666666667" y="848" font-size="18.5" font-weight="600" fill="#cbd5e1">FFmpeg · original audio at 2%</text>
+<text x="465.6666666666667" y="880" font-size="17.5" font-weight="400" fill="#8b9abb">optional burned-in subtitles</text>
+<g filter="url(#sh)"><rect x="823.3333333333334" y="740" width="716.6666666666666" height="172" rx="18" fill="url(#out)" stroke="#4f46e5" stroke-opacity="0.6" stroke-width="1.5"/></g>
+<rect x="853.3333333333334" y="776" width="92" height="100" rx="14" fill="#ffffff" fill-opacity="0.08" stroke="#c7d2fe" stroke-opacity="0.6" stroke-width="2"/>
+<path d="M889.3333333333334,808 L917.3333333333334,826 L889.3333333333334,844 z" fill="#e0e7ff"/>
+<text x="975.3333333333334" y="804" font-size="30" font-weight="800" fill="#ffffff">dubbed.mp4</text>
+<text x="975.3333333333334" y="842" font-size="18.5" font-weight="500" fill="#c7d2fe">Vietnamese voice-over, original video</text>
+<text x="975.3333333333334" y="874" font-size="18.5" font-weight="500" fill="#a7f3d0">auto-copied to Google Drive · temp clips cleaned</text>
+<text x="60" y="952" font-size="15" font-weight="700" fill="#64748b" letter-spacing="2">ACROSS EVERY STAGE</text>
+<rect x="60" y="970" width="475.7293233082707" height="42" rx="21" fill="#ffffff" fill-opacity="0.05" stroke="#334155"/>
+<text x="297.8646616541354" y="997.5" font-size="17.5" font-weight="500" fill="#cbd5e1" text-anchor="middle">Per-stage cache · resume or --redo any stage</text>
+<rect x="549.7293233082708" y="970" width="335.17293233082705" height="42" rx="21" fill="#ffffff" fill-opacity="0.05" stroke="#334155"/>
+<text x="717.3157894736843" y="997.5" font-size="17.5" font-weight="500" fill="#cbd5e1" text-anchor="middle">Local web UI with live progress</text>
+<rect x="898.9022556390978" y="970" width="410.85714285714283" height="42" rx="21" fill="#ffffff" fill-opacity="0.05" stroke="#334155"/>
+<text x="1104.3308270676691" y="997.5" font-size="17.5" font-weight="500" fill="#cbd5e1" text-anchor="middle">Pluggable LLMs: Gemini · Groq · Ollama</text>
+<rect x="1323.7593984962407" y="970" width="216.2406015037594" height="42" rx="21" fill="#ffffff" fill-opacity="0.05" stroke="#334155"/>
+<text x="1431.8796992481205" y="997.5" font-size="17.5" font-weight="500" fill="#cbd5e1" text-anchor="middle">Quota-aware fallback</text>
+<metadata><c2pa:manifest>AAAWgmp1bWIAAAAeanVtZGMycGEAEQAQgAAAqgA4m3EDYzJwYQAAABZcanVtYgAAAEdqdW1kYzJtYQARABCAAACqADibcQN1cm46YzJwYTo4MTNjY2Q4Mi0wOGZiLTRkMTEtYjg4OS1mNmRkZWU2MmFlYzMAAAADl2p1bWIAAAApanVtZGMyYXMAEQAQgAAAqgA4m3EDYzJwYS5hc3NlcnRpb25zAAAAALxqdW1iAAAARGp1bWRjYm9yABEAEIAAAKoAOJtxE2MycGEuaW5ncmVkaWVudC52MwAAAAAYYzJzaPuG1Au/9x0obLWYEGtK+ewAAABwY2JvcqNpZGM6Zm9ybWF0bWltYWdlL3N2Zyt4bWxqaW5zdGFuY2VJRHgseG1wOmlpZDpkODBjNGJmNi1kOTg4LTQxYjktYWUxMy00Nzc3MGIzMWE5MDJscmVsYXRpb25zaGlwaHBhcmVudE9mAAAB4mp1bWIAAABBanVtZGNib3IAEQAQgAAAqgA4m3ETYzJwYS5hY3Rpb25zLnYyAAAAABhjMnNojyBNtor524DEgXERNomCiAAAAZljYm9yomdhY3Rpb25zgqJmYWN0aW9ua2MycGEub3BlbmVkanBhcmFtZXRlcnOha2luZ3JlZGllbnRzgaJjdXJseC1zZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmluZ3JlZGllbnQudjNkaGFzaFggXfQCZcwvXF1P5so1NV9yL1yicPGYLDVq8o4Dw/nPuPakZmFjdGlvbngdY29tLmFudGhyb3BpYy5jbGF1ZGUucHJvdmlkZWRqcGFyYW1ldGVyc6F4H2NvbS5hbnRocm9waWMub3JpZ2luLWNvbmZpZGVuY2VndW5rbm93bmtkZXNjcmlwdGlvbnhmQ2xhdWRlIHByb3ZpZGVkIHRoaXMgZmlsZSBhdCB0aGUgcmVxdWVzdCBvZiBhIHVzZXIgYW5kIG1heSBoYXZlIGNyZWF0ZWQgb3IgbW9kaWZpZWQgdGhlIGZpbGUgY29udGVudHMubXNvZnR3YXJlQWdlbnShZG5hbWVmQ2xhdWRlcmFsbEFjdGlvbnNJbmNsdWRlZPUAAADIanVtYgAAAEBqdW1kY2JvcgARABCAAACqADibcRNjMnBhLmhhc2guZGF0YQAAAAAYYzJzaBQq5e7Bt3MQU1FZjYPWI9IAAACAY2JvcqVjYWxnZnNoYTI1NmNwYWRMAAAAAAAAAAAAAAAAZGhhc2hYILoDSYxSWQFI+Lb0j/m3lEVfLgb6pfT2TGAePlbvq1FAZG5hbWVuanVtYmYgbWFuaWZlc3RqZXhjbHVzaW9uc4GiZXN0YXJ0GTcrZmxlbmd0aBkeBAAAAj5qdW1iAAAAJ2p1bWRjMmNsABEAEIAAAKoAOJtxA2MycGEuY2xhaW0udjIAAAACD2Nib3KlY2FsZ2ZzaGEyNTZpc2lnbmF0dXJleE1zZWxmI2p1bWJmPS9jMnBhL3VybjpjMnBhOjgxM2NjZDgyLTA4ZmItNGQxMS1iODg5LWY2ZGRlZTYyYWVjMy9jMnBhLnNpZ25hdHVyZWppbnN0YW5jZUlEeCx4bXA6aWlkOmVlOTAwZThhLTY3NTctNDlhOS1iYTM4LWExNmFlYWQxZmU5ZHJjcmVhdGVkX2Fzc2VydGlvbnODomN1cmx4LXNlbGYjanVtYmY9YzJwYS5hc3NlcnRpb25zL2MycGEuaW5ncmVkaWVudC52M2RoYXNoWCBd9AJlzC9cXU/myjU1X3IvXKJw8ZgsNWryjgPD+c+49qJjdXJseCpzZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmFjdGlvbnMudjJkaGFzaFggYDRWNqpBIy5q+BMUmNxw8Y+qMohqmX7ZuRDxOq4u6O2iY3VybHgpc2VsZiNqdW1iZj1jMnBhLmFzc2VydGlvbnMvYzJwYS5oYXNoLmRhdGFkaGFzaFggAqDNBvqvFuq/kpQCBC4gPUJjL+5eXSlRPjPrgXfDn710Y2xhaW1fZ2VuZXJhdG9yX2luZm+jZG5hbWVvQW50aHJvcGljIEZpbGVzZ3ZlcnNpb25lMS4wLjBrc3BlY1ZlcnNpb25lMi40LjAAABA4anVtYgAAAChqdW1kYzJjcwARABCAAACqADibcQNjMnBhLnNpZ25hdHVyZQAAABAIY2JvctKEWQISogEmGCFZAgowggIGMIIBjaADAgECAhRA5aAK7sI50L64g/oGQgU9Z1UTADAKBggqhkjOPQQDAzBJMRcwFQYDVQQKEw5BbnRocm9waWMsIFBCQzEuMCwGA1UEAxMlQW50aHJvcGljIENvbnRlbnQgQ3JlZGVudGlhbHMgUm9vdCBDQTAeFw0yNjA4MDcxODQzNTZaFw0yODA4MDYxOTQzNTZaMEQxFzAVBgNVBAoTDkFudGhyb3BpYywgUEJDMSkwJwYDVQQDEyBBbnRocm9waWMgQ2xhdWRlIENvbnRlbnQgU2lnbmluZzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJh6CmvLUBgFFNU0vUKlOVtE6djd17L5SuwX0LemFisBM3dkd/3cyjxFA3Qo5S46fX0/ihY0VZ7mfb9KF703t5OjWDBWMA4GA1UdDwEB/wQEAwIHgDAVBgNVHSUEDjAMBgorBgEEAYPoXgIBMAwGA1UdEwEB/wQCMAAwHwYDVR0jBBgwFoAUzlHiBIFOZFsj+OPEz5o+nMHXXMIwCgYIKoZIzj0EAwMDZwAwZAIwMXMdFJ4BetLLVY7ORuE9noqbbAZOZn/aArXyTwFAZfKrPzxF2vPoJNf1+UCdg1XGAjBwX1zd9WGqYkqmL5SFqw1QySjr1zJfpJM9+1rdDwSPLMOPOjKuiXjoU/pUUeG9RwmhY3BhZFkNngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPZYQFc8TprR9NtGWlC1thbBjXFROsjhtVdYP9CyJECS3FGhodLOL4vwi8zNNaIcLVIp4zL0OhL3BI86g4gH0J7bAz8=</c2pa:manifest></metadata></svg>
