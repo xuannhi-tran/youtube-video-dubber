@@ -14,7 +14,7 @@ It is an offline pipeline, not real-time. Speech recognition and the voice run o
 - Optional review model checks the draft translation and lines shortened for timing, fixing wrong or noticeably unnatural Vietnamese.
 - Lines that do not fit their time slot are shortened by the LLM before they are read, so the dub keeps up with the video.
 - Local Vietnamese voice (VieNeu v3 Turbo), on the CPU or on an NVIDIA GPU.
-- Optional Vietnamese subtitles under the picture, original audio turned down (not removed), queue and cleanup in the local web page.
+- Optional Vietnamese subtitles under the picture, original audio turned down (not removed), queue, cleanup and a "Dịch lại" (translate again) button for finished videos in the local web page.
 
 ## Requirements
 
@@ -71,7 +71,7 @@ Everything else is set in `backend/.env`, see [Settings](#settings).
 python web.py          # opens http://127.0.0.1:8765
 ```
 
-Paste a link, choose the speaker ("Người nói": automatic, male or female), open "Tuỳ chọn nâng cao" for the other options (Vietnamese subtitles, original volume, only the first N seconds) and press the button. Each job shows a progress bar (blocks read so far during the speech stage) and the time it has run, lets you cancel, and plays or downloads `dubbed.mp4` when it is done. Several links wait in a queue and run one after another. If an LLM runs out of its daily limit, the job is marked "Hết limit" (translated chunks are kept) and the queue **stops there** instead of moving on; press "Tiếp tục job này" once the limit is back to continue the same job, or skip it. If only the shortening step hit a limit, the video is still made (the lines that could not be shortened are sped up a little) and the queue waits for "Tiếp tục hàng chờ". The queue lives in memory: closing `web.py` forgets the waiting links (finished videos stay). Finished videos from earlier runs are listed too. A failed job shows a short reason and a "Chạy lại" button that continues from the saved steps; its technical log is under "Xem log kỹ thuật". When a review model is set, a finished job lists the reviewed blocks with the first translation next to the final text (after shortening and review).
+Paste a link, choose the speaker ("Người nói": automatic, male or female), open "Tuỳ chọn nâng cao" for the other options (Vietnamese subtitles, original volume, only the first N seconds) and press the button. Each job shows a progress bar (blocks read so far during the speech stage) and the time it has run, lets you cancel, and plays or downloads `dubbed.mp4` when it is done. Several links wait in a queue and run one after another. If an LLM runs out of its daily limit, the job is marked "Hết limit" (translated chunks are kept) and the queue **stops there** instead of moving on; press "Tiếp tục job này" once the limit is back to continue the same job, or skip it. If only the shortening step hit a limit, the video is still made (the lines that could not be shortened are sped up a little) and the queue waits for "Tiếp tục hàng chờ". The queue lives in memory: closing `web.py` forgets the waiting links (finished videos stay). Finished videos from earlier runs are listed too. Each finished video has a "Dịch lại" button: it runs `dub.py` with `--redo transcribe` on the saved job (translation, review, shortening and voice again from the saved Whisper transcript, using the link saved in `video_info.json`), which is how a new prompt or model reaches a video that is already finished. A failed job shows a short reason and a "Chạy lại" button that continues from the saved steps; its technical log is under "Xem log kỹ thuật". When a review model is set, a finished job lists the reviewed blocks with the first translation next to the final text (after shortening and review).
 
 It runs `dub.py` for you, so everything above applies (resume after an error: paste the same link again; `.env`, glossary). It listens only on this computer (`127.0.0.1`), needs no extra package, and is meant to run on the PC that has the GPU and the keys, not on a public server. Options: `--port 9000`, `--no-browser`. Stop it with Ctrl+C (a running job is stopped too).
 
@@ -126,7 +126,7 @@ python dub.py URL --subs                 # burn Vietnamese subtitles in (see bel
 python dub.py URL --glossary-only        # create the job folder and glossary.json, then stop
 ```
 
-`--redo X` redoes stage X and everything after it. Changing `--max-seconds` redoes everything after the download, because the transcript depends on it.
+`--redo X` redoes stage X and everything after it. On the web page, the "Dịch lại" button of a finished video does `--redo transcribe` for you: use it after a prompt, glossary or model change, because sending the same link again only continues a finished job. Changing `--max-seconds` redoes everything after the download, because the transcript depends on it.
 
 ### Files in a job folder
 

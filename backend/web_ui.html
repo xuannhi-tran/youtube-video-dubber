@@ -224,6 +224,14 @@ async function refresh() {
       const folder = v.folder_size > v.size * 1.1 ? `  ·  cả thư mục ${(v.folder_size / 1e6).toFixed(0)} MB` : "";
       row.append(el("div", "url", `${v.video_id}  ·  ${(v.size / 1e6).toFixed(1)} MB${folder}  ·  ${new Date(v.time * 1000).toLocaleString("vi-VN")}`));
       const open = el("button", "ghost", "Xem"); open.onclick = () => { open.replaceWith(playerFor(v.video_id)); };
+      const redo = el("button", "ghost", "Dịch lại");
+      redo.title = "Dịch, duyệt, rút gọn và đọc lại từ đầu (không nghe lại bằng Whisper)";
+      redo.onclick = async () => {
+        if (!confirm(`Dịch lại video ${v.video_id}?\n\nDịch, duyệt, rút gọn và đọc giọng lại từ bản nghe đã lưu (Whisper không chạy lại). Tốn lượt gọi LLM cho cả video. Bản cũ được thay khi xong.`)) return;
+        const res = await fetch(`/api/videos/${encodeURIComponent(v.video_id)}/redo`, {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+        if (!res.ok) alert((await res.json()).error || "Không dịch lại được");
+        refresh();
+      };
       const del = el("button", "ghost", "Xóa");
       del.onclick = async () => {
         const after = v.exported ? `Bản chép ở ${v.exported} vẫn được giữ.` : "Video chưa được chép đi đâu: muốn có lại phải làm từ đầu.";
@@ -234,7 +242,7 @@ async function refresh() {
         if (!res.ok) alert((await res.json()).error || "Không xóa được");
         refresh();
       };
-      const buttons = el("div", "opts"); buttons.append(open, del);
+      const buttons = el("div", "opts"); buttons.append(open, redo, del);
       row.append(buttons); card.append(row);
       if (v.exported) card.append(el("div", "note", `Đã chép sang thư mục đồng bộ: ${v.exported}`));
       list.append(card);

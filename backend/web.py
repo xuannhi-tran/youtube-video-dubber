@@ -41,6 +41,15 @@ VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 # Pure helpers (covered by run_local_checks)
 # ---------------------------------------------------------
 
+def source_url(video_id, info):
+    """The link to run a finished video again from: the one saved in video_info.json, else YouTube's."""
+    url = str((info or {}).get("url") or "").strip() if isinstance(info, dict) else ""
+    parsed = urlparse(url)
+    if parsed.scheme in ("http", "https") and parsed.netloc and len(url) <= 500 and " " not in url:
+        return url
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
 def validate_request(data):
     """Return (url, extra dub.py arguments); raise ValueError with a message for the page."""
     if not isinstance(data, dict):
@@ -189,6 +198,11 @@ def run_local_checks():
     assert host_allowed("127.0.0.1:8765") and host_allowed("localhost:1")
     assert not host_allowed("evil.com") and not host_allowed("evil.com:80") and not host_allowed(None)
     assert VIDEO_ID.match("aB-1_x") and not VIDEO_ID.match("../x")
+    assert source_url("aB-1_x", {"url": "https://www.bilibili.com/video/BV1"}) == "https://www.bilibili.com/video/BV1"
+    for unusable in (None, {}, {"url": ""}, {"url": "javascript:alert(1)"}, {"url": "https://a b"}, "text"):
+        assert source_url("aB-1_x", unusable) == "https://www.youtube.com/watch?v=aB-1_x"
+    assert re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/(delete|redo)", "/api/videos/aB-1_x/redo")
+    assert not re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/(delete|redo)", "/api/videos/../x/redo")
     assert re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/delete", "/api/videos/aB-1_x/delete")
     assert not re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/delete", "/api/videos/../x/delete")
 
@@ -242,6 +256,11 @@ class Jobs:
                     item["hold"] = False
                     return True
         return False
+
+    def url_in_use(self, url):
+        """True while a waiting, running or paused job was queued with this link."""
+        with self.lock:
+            return any(i["url"] == url and i["status"] in ("waiting", "running", "paused") for i in self.items)
 
     def in_use(self, video_id):
         """True while a queued, running or paused job is working on this video."""
@@ -510,6 +529,23 @@ class Handler(BaseHTTPRequestHandler):
                 return
             _folder_sizes.pop(video_id, None)
             self.send_json({"ok": True, "freed": freed})
+        elif re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/redo", path):
+            video_id = path.split("/")[3]
+            folder = JOBS_DIR / video_id
+            if not folder.is_dir():
+                self.send_json({"error": "Không thấy thư mục của video này."}, 404)
+                return
+            try:
+                info = json.loads((folder / "video_info.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                info = None
+            url = source_url(video_id, info)
+            # A job only learns its video id once dub.py has started, so a queued one is matched by its link.
+            if JOBS.in_use(video_id) or JOBS.url_in_use(url):
+                self.send_json({"error": "Video này đang được làm hoặc đã nằm trong hàng chờ."}, 409)
+                return
+            # Translation, review, shortening and voice again; Whisper's saved transcript is reused.
+            self.send_json({"id": JOBS.add(url, ["--redo", "transcribe"])})
         elif re.fullmatch(r"/api/jobs/\d+/(cancel|resume|retry)", path):
             job_id, name = int(path.split("/")[3]), path.rsplit("/", 1)[1]
             result = JOBS.retry(job_id) if name == "retry" else (JOBS.cancel if name == "cancel" else JOBS.resume)(job_id)
