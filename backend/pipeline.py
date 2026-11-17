@@ -30,9 +30,9 @@ ANSWER_ATTEMPTS = 3  # fresh requests when the answer is not usable JSON
 MODELS_ENTRY = "_models"
 # Part of every cache key: raise it when the translation prompt changes, so
 # chunks translated with an older prompt are translated again.
-PROMPT_VERSION = 5
+PROMPT_VERSION = 6
 # Same for the review pass (see review_chunk).
-REVIEW_PROMPT_VERSION = 5
+REVIEW_PROMPT_VERSION = 6
 # Whisper is told the video title (first characters only: a long prompt can make it repeat itself).
 WHISPER_TITLE_CHARS = 60
 # A review that changes more lines than this share of a chunk (and more than 3) is rewriting rather
@@ -384,6 +384,10 @@ How to translate:
   pronouns and fillers Vietnamese does not need.
 - Call a historical figure, a thinker or an older person "ông" or "bà" (or by name);
   "anh ấy" and "cô ấy" are for young people only.
+- Choose the pronoun for 他/她 from WHO it is, never by habit: a child, a baby or a
+  son or daughter (also a child someone may have in the future) is "con", "đứa con",
+  "đứa trẻ" or "bé", never "ông ấy", "bà ấy" or "anh ấy"; "ông"/"bà" are only for a
+  real older person or a historical figure.
 - Forms of address: the speaker talks to the audience as "bạn" or "chúng ta".
   Never call a person, a group of people or a personality type "nó"; use their
   name, "người này", "những người này" or "họ". Refer to the same person the
@@ -553,6 +557,8 @@ Change a line when it has one of these problems:
 - a SPECIFIC person (named, or clearly the same person as in the lines around it) is called
   "nó" or "anh ấy" where "ông", "bà", the name or "họ" is right (historical figures, thinkers
   and older people are "ông" or "bà");
+- a child, a baby or a son or daughter (also a future child) is called "ông ấy", "bà ấy" or
+  "anh ấy": use "con", "đứa con", "đứa trẻ" or "bé";
 - it is said to the wrong person: who says what to whom must match the Chinese
   (the speaker "tôi", the audience "bạn"/"chúng ta", other people "họ");
 - a Chinese name or term is written inconsistently.

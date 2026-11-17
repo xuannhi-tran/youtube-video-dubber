@@ -205,9 +205,12 @@ def apply_asr_fixes(segments, fixes):
 SPEAKER_RULES = {
     "female": ("The speaker is a woman. She calls herself \"tôi\" (or \"mình\" in a casual video); "
                "when someone talks about or to her, use female forms (\"cô ấy\", \"chị\", \"bà\" for an older "
-               "woman), never \"anh\" or \"ông\"."),
+               "woman), never \"anh\" or \"ông\". This is about the speaker only: other people "
+               "get forms that fit who they are."),
     "male": ("The speaker is a man. He calls himself \"tôi\" (or \"mình\" in a casual video); when "
-             "someone talks about or to him, use male forms (\"anh ấy\", \"anh\", \"ông\" for an older man)."),
+             "someone talks about or to him, use male forms (\"anh ấy\", \"anh\", \"ông\" for an older man). "
+             "This is about the speaker only: other people, e.g. a child (\"con\", \"đứa trẻ\"), "
+             "get forms that fit who they are."),
 }
 
 
