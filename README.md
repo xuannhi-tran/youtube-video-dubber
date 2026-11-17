@@ -27,8 +27,8 @@ It is an offline pipeline, not real-time. Speech recognition and the voice run o
 ## Install
 
 ```
-git clone https://github.com/xuannhi-tran/youtube-live-dubber.git
-cd youtube-live-dubber\backend
+git clone https://github.com/xuannhi-tran/youtube-video-dubber.git
+cd youtube-video-dubber\backend
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
