@@ -34,6 +34,12 @@ button:disabled { opacity:.5; cursor:default; }
 .steps span { flex:1; height:6px; border-radius:3px; background:var(--line); }
 .steps span.on { background:var(--accent); } .steps span.now { background:var(--accent); opacity:.55; }
 .note { color:var(--muted); font-size:13px; }
+.progress { height:7px; border-radius:8px; background:var(--line); overflow:hidden; margin:8px 0 4px; }
+.progress i { display:block; height:100%; background:var(--accent); transition:width .25s; }
+details { margin-top:12px; color:var(--muted); font-size:14px; }
+summary { cursor:pointer; }
+.review-line { border-top:1px solid var(--line); padding:8px 0; }
+.error-title { color:var(--bad); font-weight:600; }
 pre { background:var(--code); border-radius:8px; padding:8px 10px; margin:8px 0 0; font:12px/1.45 ui-monospace,Consolas,monospace; max-height:150px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
 video { width:100%; max-height:420px; background:#000; border-radius:8px; margin-top:8px; }
 a { color:var(--accent); }
@@ -50,11 +56,11 @@ a { color:var(--accent); }
       <input id="url" type="text" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" required>
       <button id="go" type="submit">Làm video</button>
     </div>
-    <div class="opts">
+    <details><summary>Tuỳ chọn nâng cao</summary><div class="opts">
       <label><input id="subs" type="checkbox"> Thêm phụ đề tiếng Việt (dải đen dưới video)</label>
       <label>Âm gốc <input id="vol" type="number" min="0" max="1" step="0.01" placeholder="0.02"></label>
       <label>Chỉ thử <input id="secs" type="number" min="1" step="1" placeholder="hết"> giây đầu</label>
-    </div>
+    </div></details>
     <div id="err" class="err"></div>
   </form>
 
@@ -100,6 +106,19 @@ function renderJob(job) {
     card.append(bar);
     const label = job.status === "done" ? "Xong tất cả các bước" : (job.stage ? `Bước ${job.stage}/5: ${STEPS[job.stage - 1]}` : "Đang khởi động...");
     card.append(el("div", "note", label));
+    const elapsed = `${Math.floor(job.elapsed / 60)} phút ${job.elapsed % 60} giây`;
+    let progressLabel = `Đã chạy ${elapsed}`;
+    let percent = job.status === "done" ? 100 : 0;
+    if (job.stage_name === "speech" && job.speech_progress?.total) {
+      const p = job.speech_progress;
+      percent = Math.min(100, Math.round(p.done * 100 / p.total));
+      progressLabel = `Đọc giọng ${p.done}/${p.total} đoạn · ${elapsed}`;
+    } else if (job.stage && job.status !== "done") {
+      percent = Math.min(94, Math.round(((job.stage - 1) / 5) * 100));
+    }
+    card.append(el("div", "progress", ""));
+    card.lastChild.append(el("i", "", "")); card.lastChild.firstChild.style.width = `${percent}%`;
+    card.append(el("div", "note", progressLabel));
   }
   if (job.status === "paused") {
     card.append(el("div", "note", "Model hết limit nên job dừng ở đây, phần đã dịch được giữ lại. Các link sau chưa chạy cho tới khi bạn bấm tiếp tục."));
@@ -116,13 +135,29 @@ function renderJob(job) {
     card.append(row);
   }
   if (job.status === "failed") {
-    card.append(el("div", "note", job.error));
-    card.append(el("div", "note", "Chạy lại cùng link: phần đã xong được giữ lại, chỉ làm tiếp chỗ dở."));
+    card.append(el("div", "error-title", job.error_summary || "Job bị lỗi."));
+    card.append(el("div", "note", "Chạy lại sẽ tiếp tục từ các bước đã lưu."));
+    card.append(el("div", "opts", ""));
+    card.lastChild.append(button("Chạy lại", async () => { await act(job.id, "retry"); }));
+  }
+  if (job.review_report) {
+    const report = el("details");
+    report.append(el("summary", "", `Model review đã rà ${job.review_report.reviewed} đoạn`));
+    job.review_report.lines.forEach(line => {
+      const row = el("div", "review-line");
+      row.append(el("strong", "", `Đoạn ${line.id}${line.changed ? " · bản cuối khác bản dịch ban đầu" : " · giữ nguyên"}`));
+      row.append(el("div", "note", `Bản dịch ban đầu: ${line.before}`));
+      row.append(el("div", "note", `Bản sau fit/review: ${line.after}`));
+      report.append(row);
+    });
+    card.append(report);
   }
   if (job.log.length && job.status !== "waiting") {
     const log = el("pre", "", job.log.join("\n"));
     log.dataset.job = job.id;
-    card.append(log);
+    if (job.status === "failed") {
+      const details = el("details"); details.append(el("summary", "", "Xem log kỹ thuật"), log); card.append(details);
+    } else card.append(log);
   }
   if (job.status === "waiting" || job.status === "running") {
     const b = button("Hủy", () => act(job.id, "cancel"), true);

@@ -232,8 +232,28 @@ class Jobs:
 
     def snapshot(self):
         with self.lock:
-            return [{key: value for key, value in item.items() if key not in ("arguments", "cancel")}
-                    | {"log": item["log"][-40:]} for item in self.items[-20:]]
+            result = []
+            for item in self.items[-20:]:
+                view = {key: value for key, value in item.items() if key not in ("arguments", "cancel")}
+                view["log"] = item["log"][-300:]
+                view["elapsed"] = max(0, int((item["ended"] or time.time()) - item["started"])) if item["started"] else 0
+                view["speech_progress"] = speech_progress(item["log"])
+                view["review_report"] = review_report(item["video_id"])
+                view["error_summary"] = item["error"].split("|")[-1].strip()[:220]
+                result.append(view)
+            return result
+
+    def retry(self, job_id):
+        with self.lock:
+            item = next((i for i in self.items if i["id"] == job_id), None)
+            if not item or item["status"] not in ("failed", "cancelled"):
+                return None
+            retry_id = next(self.ids)
+            self.items.append({"id": retry_id, "url": item["url"], "arguments": list(item["arguments"]),
+                               "status": "waiting", "video_id": item["video_id"], "stage": 0,
+                               "stage_name": "", "log": [], "error": "", "cancel": False,
+                               "started": None, "ended": None, "hold": False, "warning": ""})
+            return retry_id
 
     def worker(self):
         while True:
@@ -319,6 +339,36 @@ def finished_videos():
                                "folder_size": job_size(folder),
                                "exported": sync_copy.existing_copy(folder.name)})
     return sorted(result, key=lambda entry: entry["time"], reverse=True)
+
+
+def speech_progress(lines):
+    completed, total = set(), None
+    for line in lines:
+        match = re.search(r"Translation complete: (\d+) blocks", line)
+        if match:
+            total = int(match.group(1))
+        match = re.search(r"\[(\d{3})\] \d+(?:\.\d+)?s for a .*?slot", line)
+        if match:
+            completed.add(int(match.group(1)))
+    return {"done": len(completed), "total": total}
+
+
+def review_report(video_id):
+    if not video_id or not VIDEO_ID.fullmatch(video_id):
+        return None
+    path = JOBS_DIR / video_id / "speech_state.json"
+    try:
+        records = json.loads(path.read_text(encoding="utf-8")).get("blocks", {})
+        reviewed = [(int(key), value) for key, value in records.items()
+                    if isinstance(value, dict) and value.get("post_fit_review_version", 0) >= 1]
+    except (OSError, ValueError, TypeError):
+        return None
+    if not reviewed:
+        return None
+    return {"reviewed": len(reviewed), "total": len(records),
+            "lines": [{"id": key, "before": value.get("input", ""), "after": value.get("text", ""),
+                       "changed": value.get("input") != value.get("text")}
+                      for key, value in reviewed]}
 
 
 # ---------------------------------------------------------
@@ -436,10 +486,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             _folder_sizes.pop(video_id, None)
             self.send_json({"ok": True, "freed": freed})
-        elif re.fullmatch(r"/api/jobs/\d+/(cancel|resume)", path):
-            action = JOBS.cancel if path.endswith("/cancel") else JOBS.resume
-            ok = action(int(path.split("/")[3]))
-            self.send_json({"ok": ok}, 200 if ok else 404)
+        elif re.fullmatch(r"/api/jobs/\d+/(cancel|resume|retry)", path):
+            job_id, name = int(path.split("/")[3]), path.rsplit("/", 1)[1]
+            result = JOBS.retry(job_id) if name == "retry" else (JOBS.cancel if name == "cancel" else JOBS.resume)(job_id)
+            ok = result is not None if name == "retry" else result
+            self.send_json({"ok": ok, "id": result if name == "retry" else None}, 200 if ok else 404)
         else:
             self.send_json({"error": "not found"}, 404)
 
