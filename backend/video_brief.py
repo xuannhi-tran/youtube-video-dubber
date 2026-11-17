@@ -64,6 +64,8 @@ def info_from_ytdlp(data, speaker=None, previous=None):
         "description": str(data.get("description") or "").strip()[:MAX_DESCRIPTION_CHARS],
         "channel": str(data.get("channel") or data.get("uploader") or "").strip(),
         "speaker": chosen if chosen in SPEAKERS else "",
+        # Where the video came from, so the web page can run it again from the saved job.
+        "url": str(data.get("webpage_url") or previous.get("url") or "").strip(),
     }
 
 
@@ -273,7 +275,9 @@ def run_local_checks():
     data = {"title": " 每个人都有病 ", "description": "x" * 2000, "uploader": "某频道"}
     info = info_from_ytdlp(data, "female")
     assert info == {"title": "每个人都有病", "description": "x" * MAX_DESCRIPTION_CHARS,
-                    "channel": "某频道", "speaker": "female"}
+                    "channel": "某频道", "speaker": "female", "url": ""}
+    assert info_from_ytdlp({**data, "webpage_url": " https://youtu.be/x "})["url"] == "https://youtu.be/x"
+    assert info_from_ytdlp(data, None, {"url": "https://youtu.be/old"})["url"] == "https://youtu.be/old"  # kept
     assert info_from_ytdlp(data, None, {"speaker": "male"})["speaker"] == "male"  # kept
     assert info_from_ytdlp(data, "auto", {"speaker": "male"})["speaker"] == ""   # auto clears it
     assert info_from_ytdlp(data, "robot")["speaker"] == ""
