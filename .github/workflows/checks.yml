@@ -1,0 +1,24 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  local-checks:
+    # The pipeline runs on Windows, so the checks do too.
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the light dependencies (no GPU, no TTS models)
+        run: pip install faster-whisper httpx python-dotenv numpy
+      - name: Run every module's run_local_checks()
+        working-directory: backend
+        env:
+          PYTHONUTF8: "1"
+        run: python run_checks.py
