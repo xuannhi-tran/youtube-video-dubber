@@ -14,6 +14,7 @@ from faster_whisper import WhisperModel
 import llm
 import glossary
 from glossary import GLOSSARY, prompt_lines, relevant, whisper_hotwords
+import video_brief
 from workdir import WORKDIR
 
 OUTPUT_FILE = WORKDIR / "translated_segments.json"
@@ -29,9 +30,11 @@ ANSWER_ATTEMPTS = 3  # fresh requests when the answer is not usable JSON
 MODELS_ENTRY = "_models"
 # Part of every cache key: raise it when the translation prompt changes, so
 # chunks translated with an older prompt are translated again.
-PROMPT_VERSION = 4
+PROMPT_VERSION = 5
 # Same for the review pass (see review_chunk).
-REVIEW_PROMPT_VERSION = 3
+REVIEW_PROMPT_VERSION = 4
+# Whisper is told the video title (first characters only: a long prompt can make it repeat itself).
+WHISPER_TITLE_CHARS = 60
 # A review that changes more lines than this share of a chunk (and more than 3) is rewriting rather
 # than correcting; it is still used, but the log says so (see review_warning).
 REVIEW_WARN_SHARE = 0.25
@@ -66,12 +69,13 @@ def load_whisper():
         return WhisperModel("large-v3", **settings)
 
 
-def transcribe_audio(audio_file, max_seconds, hotwords=None):
+def transcribe_audio(audio_file, max_seconds, hotwords=None, initial_prompt=None):
     print("\n[1/3] Loading Whisper large-v3...")
 
     model = load_whisper()
 
-    print("Transcribing..." + (f" (expecting: {hotwords})" if hotwords else ""))
+    print("Transcribing..." + (f" (expecting: {hotwords})" if hotwords else "")
+          + (f" (title: {initial_prompt})" if initial_prompt else ""))
 
     start_time = time.perf_counter()
 
@@ -81,6 +85,8 @@ def transcribe_audio(audio_file, max_seconds, hotwords=None):
         beam_size=5,
         vad_filter=True,
         hotwords=hotwords,
+        # The title tells Whisper the topic's words (names, terms) before it hears them.
+        initial_prompt=initial_prompt,
     )
 
     result = []
@@ -122,21 +128,33 @@ def write_json_atomic(path, data):
             time.sleep(0.1)
 
 
-def load_or_transcribe(audio_file, max_seconds):
+def whisper_prompt(title):
+    """The start of the video title for Whisper, or None."""
+    title = " ".join((title or "").split())[:WHISPER_TITLE_CHARS]
+    return title or None
+
+
+def load_or_transcribe(audio_file, max_seconds, title=None):
     """Whisper is the slow stage, so keep its output with the other job files."""
     hotwords = whisper_hotwords(GLOSSARY)
+    prompt = whisper_prompt(title)
     stamp = {
         "audio": audio_file.name,
         "bytes": audio_file.stat().st_size,
         "max_seconds": max_seconds,
         "hotwords": hotwords,
     }
+    if prompt:  # only then, so transcripts made before titles were used stay valid
+        stamp["title"] = prompt
     if RAW_FILE.exists():
         saved = json.loads(RAW_FILE.read_text(encoding="utf-8"))
-        if saved.get("stamp") == stamp:
+        old = saved.get("stamp")
+        # A transcript made before the title was known is still kept (the brief's fixes cover it).
+        if old == stamp or (isinstance(old, dict) and "title" not in old and old == {
+                key: value for key, value in stamp.items() if key != "title"}):
             print(f"Using saved transcript ({len(saved['segments'])} segments)")
             return saved["segments"]
-    segments = transcribe_audio(audio_file, max_seconds, hotwords)
+    segments = transcribe_audio(audio_file, max_seconds, hotwords, prompt)
     write_json_atomic(RAW_FILE, {"stamp": stamp, "segments": segments})
     return segments
 
@@ -300,7 +318,9 @@ def context_lines(context):
     return "\n".join(f"{source} => {translation}" for source, translation in context)
 
 
-def build_translation_prompt(chunk, context=()):
+def build_translation_prompt(chunk, context=(), brief=None):
+    """`brief` = {"about": 'About this video' text, "timing": duration rule} (both optional)."""
+    brief = brief or {}
     input_segments = [
         {
             "start": item["start"],
@@ -370,7 +390,7 @@ How to translate:
   same way throughout.
 - Write only what a voice-over can read: no parentheses, no quotation marks,
   no brackets, no symbols.
-{glossary_rule}- Preserve every start and end timestamp exactly.
+{brief.get("timing", "")}{glossary_rule}- Preserve every start and end timestamp exactly.
 - Return exactly the same number of segments as the input, in the same order.
 - Return ONLY valid JSON.
 
@@ -384,7 +404,7 @@ Required format:
   }}
 ]
 
-{context_block}Chinese transcript to translate:
+{brief.get("about", "")}{context_block}Chinese transcript to translate:
 
 {json.dumps(input_segments, ensure_ascii=False)}
 """
@@ -401,7 +421,7 @@ def retry_note(problem, expected):
     )
 
 
-def translate_chunk(chunk, model=None, context=(), generate=None):
+def translate_chunk(chunk, model=None, context=(), generate=None, brief=None):
     """Vietnamese for every segment of `chunk`, as [{"start", "end", "text"}, ...].
 
     An unusable answer is asked again (telling the model what was wrong). If a
@@ -409,7 +429,7 @@ def translate_chunk(chunk, model=None, context=(), generate=None):
     are easier for a small local model to count.
     """
     generate = generate or (lambda text: llm.generate(text, model=model, role="translate"))
-    prompt = build_translation_prompt(chunk, context)
+    prompt = build_translation_prompt(chunk, context, brief)
 
     last_problem = None
     for attempt in range(1, ANSWER_ATTEMPTS + 1):
@@ -434,9 +454,11 @@ def translate_chunk(chunk, model=None, context=(), generate=None):
         raise RuntimeError(f"The model never returned a usable translation: {last_problem}")
     middle = len(chunk) // 2
     print(f"Translating this chunk in two halves ({middle} + {len(chunk) - middle} segments)...")
-    first = translate_chunk(chunk[:middle], model, context, generate)
+    # The halves keep the video context, but their timing rule would describe the whole chunk.
+    halves = {"about": (brief or {}).get("about", "")}
+    first = translate_chunk(chunk[:middle], model, context, generate, halves)
     joined = list(context) + [(source["source_text"], item["text"]) for source, item in zip(chunk[:middle], first)]
-    second = translate_chunk(chunk[middle:], model, joined[-CONTEXT_SEGMENTS:], generate)
+    second = translate_chunk(chunk[middle:], model, joined[-CONTEXT_SEGMENTS:], generate, halves)
     return first + second
 
 
@@ -503,7 +525,8 @@ def review_warning(changed, count):
     return ""
 
 
-def build_review_prompt(chunk, draft):
+def build_review_prompt(chunk, draft, brief=None):
+    about = (brief or {}).get("about", "")
     lines = "\n".join(
         f"{number}. {source['source_text']}  =>  {item['text']}"
         for number, (source, item) in enumerate(zip(chunk, draft), start=1)
@@ -551,7 +574,7 @@ Return ONLY a JSON array of the lines you fix, for example
 [{{"n": 3, "text": "corrected Vietnamese"}}]
 and [] if no line needs a change.
 
-{lines}
+{about}{lines}
 """
 
 
@@ -597,10 +620,10 @@ def apply_review(draft, corrections, skipped=None):
     return result, changed
 
 
-def review_chunk(chunk, draft, generate=None):
+def review_chunk(chunk, draft, generate=None, brief=None):
     """The draft with the model's corrections; the draft itself when the answer is unusable."""
     generate = generate or (lambda text: llm.generate(text, role="review"))
-    prompt = build_review_prompt(chunk, draft)
+    prompt = build_review_prompt(chunk, draft, brief)
     for attempt in (1, 2):
         request = prompt if attempt == 1 else prompt + (
             "\n\nYour previous answer could not be read. Answer with ONLY a JSON array like "
@@ -620,7 +643,7 @@ def review_chunk(chunk, draft, generate=None):
     return draft
 
 
-def review_key(chunk, draft, model_name):
+def review_key(chunk, draft, model_name, brief=None):
     request = {
         "review": model_name,
         "chunk": chunk,
@@ -628,6 +651,8 @@ def review_key(chunk, draft, model_name):
         "glossary": relevant(GLOSSARY, chunk_source_text(chunk)),
         "prompt": REVIEW_PROMPT_VERSION,
     }
+    if (brief or {}).get("about"):  # only then, so a job without video context keeps its saved reviews
+        request["about"] = brief["about"]
     return hashlib.sha256(json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -639,11 +664,12 @@ def chunk_source_text(chunk):
     return " ".join(item["source_text"] for item in chunk)
 
 
-def chunk_key(chunk, model_name=None):
+def chunk_key(chunk, model_name=None, brief=None):
     """Identifies a chunk's translation request, so a changed input is re-translated.
 
     Only the glossary entries that apply to this chunk are part of the key, so
     adding a name that is not in a chunk does not translate that chunk again.
+    The video context and timing rule are part of it when there are any.
     """
     request = {
         "chunk": chunk,
@@ -651,6 +677,9 @@ def chunk_key(chunk, model_name=None):
         "model": model_name or llm.describe(role="translate"),
         "prompt": PROMPT_VERSION,
     }
+    for part in ("about", "timing"):
+        if (brief or {}).get(part):
+            request[part] = brief[part]
     encoded = json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -667,7 +696,7 @@ def earlier_models(cache, current):
     return [name for name in dict.fromkeys(names + defaults) if isinstance(name, str) and name != current]
 
 
-def find_cached(cache, chunk, current, reuse_other_models=True):
+def find_cached(cache, chunk, current, reuse_other_models=True, brief=None):
     """(translation, model name) of a saved translation of `chunk`, or (None, None).
 
     Prefers the current model. Unless told otherwise, a translation another
@@ -677,12 +706,12 @@ def find_cached(cache, chunk, current, reuse_other_models=True):
     def usable(translated):
         return is_usable(translated, len(chunk))  # one with Chinese left in it is translated again
 
-    key = chunk_key(chunk, current)
+    key = chunk_key(chunk, current, brief)
     if key in cache and usable(cache[key]):
         return cache[key], current
     if reuse_other_models:
         for name in earlier_models(cache, current):
-            other = chunk_key(chunk, name)
+            other = chunk_key(chunk, name, brief)
             if other in cache and usable(cache[other]):
                 return cache[other], name
     return None, None
@@ -782,6 +811,23 @@ def run_local_checks():
         assert "Glossary" not in build_translation_prompt(named) and "Hán Việt" in build_translation_prompt(named)
     finally:
         GLOSSARY = saved_glossary
+
+    # Video context and timing reach the prompts and the cache keys only when there are any.
+    extra = {"about": "About this video (for understanding only, do not translate this):\nTitle: X\n\n",
+             "timing": "- Timing: this passage is 20 seconds of speech...\n"}
+    prompt = build_translation_prompt(chunk, brief=extra)
+    assert "Title: X" in prompt and "- Timing:" in prompt
+    assert prompt.index("Title: X") < prompt.index("Chinese transcript to translate:")
+    assert "About this video" not in build_translation_prompt(chunk) and "Timing" not in build_translation_prompt(chunk)
+    assert chunk_key(chunk, "x:y") == chunk_key(chunk, "x:y", {"about": "", "timing": ""})
+    assert chunk_key(chunk, "x:y") != chunk_key(chunk, "x:y", extra)
+    assert "Title: X" in build_review_prompt(chunk, [{"text": "a"}] * 3, extra)
+    assert review_key(chunk, [{"text": "a"}] * 3, "m") != review_key(chunk, [{"text": "a"}] * 3, "m", extra)
+    seen = []
+    translate_chunk(chunk, generate=lambda p: seen.append(p) or answer(["a", "b", "c"]), brief=extra)
+    assert "Title: X" in seen[0] and "- Timing:" in seen[0]
+    assert whisper_prompt("  每个人  都有病 ") == "每个人 都有病" and whisper_prompt("") is None
+    assert len(whisper_prompt("字" * 200)) == WHISPER_TITLE_CHARS
 
     current, old = "ollama:qwen3:8b", f"groq:{llm.DEFAULT_MODELS['groq']}"
     groq_text = [{"text": f"từ groq {i}"} for i in range(3)]
@@ -887,16 +933,60 @@ def parse_args():
     return args
 
 
+def timing_enabled():
+    """TRANSLATE_TIMING=1 asks for a translation that fits the passage's time. Off by default: in a test
+    it made the text 7% shorter but dropped details and flattened metaphors (盲选 lost "nhắm mắt",
+    山洪 became "khó khăn"), which the speech stage's shortening does more carefully, line by line."""
+    return (os.getenv("TRANSLATE_TIMING") or "0").strip().lower() in ("1", "yes", "true", "on")
+
+
+def prepare_brief(info, segments, current):
+    """(brief, segments with recognition errors fixed). One LLM call; a failure only costs the brief."""
+    if not video_brief.enabled():
+        return {}, segments
+    print("\nReading the whole transcript for the video brief (topic, speaker, names, misheard words)...")
+    try:
+        brief = video_brief.make_brief(info, segments, lambda text: llm.generate(text, role="translate"), current)
+    except (llm.QuotaExhausted, llm.LLMError, RuntimeError) as error:
+        print(f"No video brief ({str(error)[:150]}); translating without it.")
+        return {}, segments
+    if not brief:
+        print("No usable video brief; translating without it.")
+        return {}, segments
+    fixed, changed = video_brief.apply_asr_fixes(segments, brief.get("asr_fixes", []))
+    speaker = video_brief.speaker_of(info, brief) or "unknown"
+    print(f"Video brief: speaker {speaker}, {len(brief.get('terms', []))} names/terms, "
+          f"{len(brief.get('asr_fixes', []))} misheard words fixed in {changed} segments")
+    for fix in brief.get("asr_fixes", [])[:10]:
+        print(f"  heard {fix['wrong']} -> {fix['right']}")
+    return brief, fixed
+
+
+def chunk_brief(info, brief, chunk, words_per_second):
+    """The per-chunk prompt additions: the video context and the timing rule."""
+    return {
+        "about": video_brief.context_block(info, brief, chunk_source_text(chunk)),
+        "timing": video_brief.duration_rule(chunk, words_per_second) if timing_enabled() else "",
+    }
+
+
 def main():
     run_local_checks()
+    video_brief.run_local_checks()
     args = parse_args()
-    segments = load_or_transcribe(args.audio, args.max_seconds)
+    info = video_brief.load_info()
+    segments = load_or_transcribe(args.audio, args.max_seconds, info["title"])
     if not segments:
         raise SystemExit("Whisper found no speech in this audio.")
+
+    current = llm.describe(role="translate")
+    brief, segments = prepare_brief(info, segments, current)
+    words_per_second = video_brief.calibrated_words_per_second()
 
     print("\n[2/3] Creating translation chunks...")
 
     chunks = create_chunks(segments)
+    briefs = [chunk_brief(info, brief, chunk, words_per_second) for chunk in chunks]
 
     print(f"Created {len(chunks)} context chunks.")
 
@@ -904,7 +994,6 @@ def main():
     final_segments = []
     context = []
     write_json_atomic(PARTIAL_FILE, {"complete": False, "segments": []})
-    current = llm.describe(role="translate")
 
     reviewer = llm.describe(role="review") if llm.role_configured("review") else None
     pool = None
@@ -992,7 +1081,7 @@ def main():
         for index, chunk in enumerate(chunks):
             start = chunk[0]["start"]
             end = chunk[-1]["end"]
-            translated, made_by = find_cached(cache, chunk, current, not args.retranslate)
+            translated, made_by = find_cached(cache, chunk, current, not args.retranslate, briefs[index])
 
             if translated is not None:
                 by = "" if made_by == current else f" by {made_by}"
@@ -1007,10 +1096,10 @@ def main():
                     f"({start:.2f}s -> {end:.2f}s)..."
                 )
                 try:
-                    translated = translate_chunk(chunk, context=context)
+                    translated = translate_chunk(chunk, context=context, brief=briefs[index])
                 except (llm.QuotaExhausted, llm.LLMError, RuntimeError) as error:
                     stop(error, "translation")
-                cache[chunk_key(chunk, current)] = translated
+                cache[chunk_key(chunk, current, briefs[index])] = translated
                 remember_model(cache, current)
                 write_json_atomic(CACHE_FILE, cache)
 
@@ -1020,13 +1109,14 @@ def main():
             if not reviewer:
                 ready[index] = translated
             else:
-                key = review_key(chunk, translated, reviewer)
+                key = review_key(chunk, translated, reviewer, briefs[index])
                 if key in cache and is_usable(cache[key], len(chunk)):
                     ready[index] = cache[key]
                 elif tracker.off:
                     ready[index] = translated
                 else:
-                    pending[index] = (pool.submit(review_chunk, chunk, translated), translated, key, time.monotonic())
+                    pending[index] = (pool.submit(review_chunk, chunk, translated, None, briefs[index]),
+                                      translated, key, time.monotonic())
                 collect()
             publish()
 

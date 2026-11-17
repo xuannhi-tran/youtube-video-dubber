@@ -70,6 +70,11 @@ def validate_request(data):
         if not seconds > 0:
             raise ValueError("Số giây thử phải là số dương.")
         arguments += ["--max-seconds", str(seconds)]
+    speaker = str(data.get("speaker") or "").strip()
+    if speaker:
+        if speaker not in ("auto", "male", "female"):
+            raise ValueError("Người nói phải là tự đoán, nam hoặc nữ.")
+        arguments += ["--speaker", speaker]
     return url, arguments
 
 
@@ -133,9 +138,12 @@ def run_local_checks():
     assert url == "https://youtu.be/abc"
     assert args == ["--subs", "--original-volume", "0.05", "--max-seconds", "120.0"]
     assert validate_request({"url": "https://x.com/v"})[1] == []
+    assert validate_request({"url": "https://x.com/v", "speaker": "female"})[1] == ["--speaker", "female"]
+    assert validate_request({"url": "https://x.com/v", "speaker": ""})[1] == []
     for bad in (None, {}, {"url": "ftp://x"}, {"url": "-o evil"}, {"url": "https://a b"},
                 {"url": "https://x.com", "original_volume": "2"},
                 {"url": "https://x.com", "original_volume": "abc"},
+                {"url": "https://x.com", "speaker": "robot"},
                 {"url": "https://x.com", "max_seconds": "0"},
                 {"url": "https://x.com/" + "a" * 600}):
         try:

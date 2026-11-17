@@ -18,6 +18,7 @@ h2 { font-size:16px; margin:28px 0 10px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:12px; }
 form .row { display:flex; gap:8px; }
 input[type=text], input[type=number] { width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font:inherit; }
+select { padding:5px 8px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font:inherit; }
 button { padding:9px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; white-space:nowrap; }
 button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); padding:4px 10px; font-size:13px; }
 button:disabled { opacity:.5; cursor:default; }
@@ -56,6 +57,16 @@ a { color:var(--accent); }
       <input id="url" type="text" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" required>
       <button id="go" type="submit">Làm video</button>
     </div>
+    <div class="opts">
+      <label>Người nói
+        <select id="speaker" title="Giúp dịch đúng cách xưng hô; nếu .env có TTS_VOICE_FEMALE / TTS_VOICE_MALE thì đọc bằng giọng đó">
+          <option value="">Như lần trước / tự đoán</option>
+          <option value="female">Nữ</option>
+          <option value="male">Nam</option>
+          <option value="auto">Tự đoán (bỏ lựa chọn cũ)</option>
+        </select>
+      </label>
+    </div>
     <details><summary>Tuỳ chọn nâng cao</summary><div class="opts">
       <label><input id="subs" type="checkbox"> Thêm phụ đề tiếng Việt (dải đen dưới video)</label>
       <label>Âm gốc <input id="vol" type="number" min="0" max="1" step="0.01" placeholder="0.02"></label>
@@ -79,7 +90,8 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 $("form").addEventListener("submit", async ev => {
   ev.preventDefault();
   $("err").textContent = "";
-  const body = {url: $("url").value, subs: $("subs").checked, original_volume: $("vol").value, max_seconds: $("secs").value};
+  const body = {url: $("url").value, subs: $("subs").checked, original_volume: $("vol").value, max_seconds: $("secs").value,
+                speaker: $("speaker").value};
   const res = await fetch("/api/jobs", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
   const data = await res.json();
   if (!res.ok) { $("err").textContent = data.error || "Lỗi"; return; }

@@ -177,6 +177,8 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `REVIEW_LLM_PROVIDER`, `REVIEW_LLM_MODEL` | Optional second pass over the translation and a final check of lines shortened for timing: the model reads the Chinese next to the Vietnamese and fixes meaning errors, word-for-word phrasing, or noticeably unnatural Vietnamese (see "Checking the translation" below). Off while `REVIEW_LLM_PROVIDER` is empty. |
 | `REVIEW_WORKERS` | Chunks the review pass checks at the same time (1 to 16, default 4). |
 | `REVIEW_TIMEOUT` | Seconds a chunk waits for its review before the draft is used (default 150, 0 = no limit). |
+| `VIDEO_BRIEF`, `TRANSLATE_TIMING` | The whole-video brief (on, `0` turns it off) and the per-passage time budget (off, `1` turns it on); see [What the translator knows about the whole video](#what-the-translator-knows-about-the-whole-video). |
+| `TTS_VOICE_FEMALE`, `TTS_VOICE_MALE` | Voice for videos whose speaker was set with `--speaker female` / `male` (or on the web page); empty keeps `TTS_VOICE`. |
 | `TRANSLATE_LLM_REASONING`, `FIT_LLM_REASONING`, `REVIEW_LLM_REASONING` | How hard a Groq or Gemini model may think (`low`, `none`... sent as `reasoning_effort`). Empty keeps the model's default; a value the model does not know makes its requests fail, so remove it if you see errors. |
 | `FIT_FALLBACK_PROVIDER`, `FIT_FALLBACK_MODEL` | Shortening only: if the main LLM runs out of its daily quota, this one takes over for the rest of the run (e.g. `ollama` / `qwen3:8b`). Lines already shortened are kept. The next run tries the main LLM first again. Not available for translation. |
 | `LLM_MAX_TOKENS` | Cap on the answer length (some Groq models allow very little per minute). |
@@ -234,6 +236,17 @@ REVIEW_LLM_MODEL=gemma-4-31b-it
 ```
 
 For every chunk the review model gets the Chinese and the draft and answers with only the lines to change, so its answer is short. It fixes awkward word order, duplicated meaning, stiff expressions and other noticeable issues in spoken Vietnamese while preserving the source meaning and line timing. A fix is ignored if it is much longer than the draft, has Chinese characters or removes the last sentence end. Chunks are checked in parallel while the next ones are still being translated (`REVIEW_WORKERS`), and `translated_partial.json` only ever holds settled text (reviewed, or the draft when the review gave up). The review never stops the dub: a chunk whose review fails (server error, daily quota) or is not back within `REVIEW_TIMEOUT` seconds of its draft (default 150, 0 = no limit) keeps its draft. After 3 such chunks in a row, or at once on a daily quota, the review is switched off for the rest of the run. Drafts kept this way are not saved as reviewed, so running the same command again reviews them; with an unusable answer the draft is kept too. Reviews are saved in `translate_cache.json`, so running again costs nothing. To compare models on one chunk first, use `python compare_translators.py VIDEO_ID --provider gemini --models a,b`.
+
+### What the translator knows about the whole video
+
+Each chunk is only about 20 seconds, so before translating, `pipeline.py` gives every chunk what the whole video says:
+
+- **Title, description, channel** come from YouTube (`dub.py` saves them in the job's `video_info.json`). Whisper also gets the start of the title, so it hears the topic's names and terms better.
+- **Video brief** (`video_brief.json`): one call to the translation model reads the whole transcript and returns a short summary, the speaker as heard, how the audience is addressed, the names and terms with their Vietnamese (Hán Việt for Chinese names, original spelling for foreign ones, usual Vietnamese titles for books), and the words Whisper clearly misheard. Those are fixed in the transcript before it is translated (the log lists them, e.g. `heard 孙子悲话 -> 孙子兵法`, `heard 连坡 -> 廉颇`). The title, summary, speaker and the terms of the passage go into every translation and review prompt. It is saved, so a re-run costs nothing; `VIDEO_BRIEF=0` turns the call off.
+- **Speaker**: `dub.py URL --speaker female` (or `male`, or the "Người nói" menu on the web page) tells the translation who speaks, so a woman is never called "anh" or "ông". It is remembered per video (`--speaker auto` forgets it and lets the brief guess). If `.env` has `TTS_VOICE_FEMALE` / `TTS_VOICE_MALE`, that voice reads videos with that speaker instead of `TTS_VOICE`.
+- `TRANSLATE_TIMING=1` also tells the translator how many seconds each passage lasts and how many Vietnamese words fit. It is off by default: in a test it made the text 7% shorter but dropped details and flattened metaphors, which the speech stage's line-by-line shortening handles better.
+
+To measure a change instead of guessing, `python eval_translation.py VIDEO_ID --make-reference --from 60 --to 180` copies some lines into `reference.json`; correct them by hand once, then `python eval_translation.py VIDEO_ID` scores the current translation against them (chrF, 0 to 100) and lists the lines furthest from your version. `--candidate a.json --candidate b.json` compares saved versions side by side.
 
 When the speech stage shortens a block to fit its time slot, the same review model checks that fitted text against the Chinese before it is read. It may fix awkward grammar, speaker perspective, or an unnatural literal metaphor, but its answer must stay within the block's word budget. The voice is then synthesized and measured again, so an edited line is not reused from the audio cache. This adds one review request for each block that was shortened; it runs only when `REVIEW_LLM_PROVIDER` is set.
 
@@ -321,6 +334,8 @@ python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5
 | `cleanup.py` | Frees disk space of finished jobs, see [Freeing disk space](#freeing-disk-space). |
 | `sync_copy.py` | Copies finished videos to `EXPORT_DIR` (those not copied yet). |
 | `compare_translators.py JOB_ID` | Translates the same window of a job with several models, side by side, into `translator_compare_output/`. |
+| `eval_translation.py JOB_ID` | Scores a job's translation against a reference you corrected by hand (chrF), see above. |
+| `video_brief.py` | The whole-video brief used by `pipeline.py`; run alone it checks its own logic. |
 | `compare_voices.py` | Reads a sample with every VieNeu preset voice and writes an `index.html` to listen and compare. |
 | `tts_speed_test.py` | Measures VieNeu speed on CPU vs GPU. |
 | `fit_blocks.py` | The shortening step on its own. Dry run by default; `--apply` calls the LLM. `speech.py` uses it too. |
