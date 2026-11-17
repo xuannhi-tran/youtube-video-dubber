@@ -344,6 +344,7 @@ python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5
 | `sync_copy.py` | Copies finished videos to `EXPORT_DIR` (those not copied yet). |
 | `compare_translators.py JOB_ID` | Translates the same window of a job with several models, side by side, into `translator_compare_output/`. |
 | `eval_translation.py JOB_ID` | Scores a job's translation against a reference you corrected by hand (chrF), see above. |
+| `run_checks.py` | Runs every module's built-in checks (no GPU, keys or network needed); GitHub Actions runs it on every push and pull request. |
 | `video_brief.py` | The whole-video brief used by `pipeline.py`; run alone it checks its own logic. |
 | `compare_voices.py` | Reads a sample with every VieNeu preset voice and writes an `index.html` to listen and compare. |
 | `tts_speed_test.py` | Measures VieNeu speed on CPU vs GPU. |
