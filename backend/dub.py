@@ -32,6 +32,7 @@ import time
 import cleanup
 import llm
 import sync_copy
+import video_brief
 from workdir import SCRIPT_DIR, replace_file
 
 
@@ -168,6 +169,17 @@ def run_local_checks():
         assert stage_for_missing_files(job, every[:2]) is None        # speech not done: nothing to restore
     assert missing_modules(lambda module: module != "vieneu") == ["vieneu"]
     assert missing_modules(lambda module: True) == []
+    saved_voice = os.environ.get("TTS_VOICE_FEMALE")
+    os.environ["TTS_VOICE_FEMALE"] = " ngoc_huyen "
+    assert voice_for("female") == "ngoc_huyen" and voice_for("") is None and voice_for("auto") is None
+    del os.environ["TTS_VOICE_FEMALE"]
+    assert voice_for("female") is None  # no female voice set: TTS_VOICE stays
+    if saved_voice is not None:
+        os.environ["TTS_VOICE_FEMALE"] = saved_voice
+    with tempfile.TemporaryDirectory() as folder:
+        info = save_video_info(Path(folder), {"id": "a", "title": "标题", "channel": "c"}, "female")
+        assert info["speaker"] == "female" and info["title"] == "标题"
+        assert save_video_info(Path(folder), {"id": "a", "title": "标题"}, None)["speaker"] == "female"  # kept
 
 
 # ---------------------------------------------------------
@@ -257,6 +269,9 @@ def script_command(job, script, *script_args):
         "PYTHONUTF8": "1",
         "PYTHONUNBUFFERED": "1",
     }
+    voice = voice_for(video_brief.load_info(job / "video_info.json")["speaker"])
+    if voice:  # a female (or male) speaker gets the voice set for them in .env
+        environment["TTS_VOICE"] = voice
     command = [sys.executable, str(SCRIPT_DIR / script), *map(str, script_args)]
     print(f"\n>>> {script} {' '.join(map(str, script_args))}".rstrip(), flush=True)
     return command, environment
@@ -326,13 +341,33 @@ def run_side_by_side(job, transcribe_args, on_translated):
             process.relay.join()
 
 
-def fetch_video_id(url):
-    command = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--print", "id", url]
+def fetch_video(url):
+    """(video id, yt-dlp's metadata) of the link: the title and description help the translation."""
+    command = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--skip-download", "--dump-single-json", url]
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if result.returncode != 0 or not lines:
+    try:
+        data = json.loads(result.stdout) if result.returncode == 0 else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or not data.get("id"):
         raise SystemExit(f"yt-dlp could not read that link:\n{result.stderr.strip()}")
-    return safe_id(lines[-1])
+    return safe_id(str(data["id"])), data
+
+
+def save_video_info(job, data, speaker):
+    """Write video_info.json (title, description, channel, speaker) for pipeline.py; return it."""
+    path = job / "video_info.json"
+    previous = video_brief.load_info(path)
+    info = video_brief.info_from_ytdlp(data, speaker, previous)
+    path.write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return info
+
+
+def voice_for(speaker):
+    """TTS_VOICE_FEMALE / TTS_VOICE_MALE from .env for a chosen speaker, else None (TTS_VOICE stays)."""
+    if speaker not in video_brief.SPEAKERS:
+        return None
+    return (os.getenv(f"TTS_VOICE_{speaker.upper()}") or "").strip() or None
 
 
 def download(url, job, max_height):
@@ -471,6 +506,10 @@ def parse_args():
     parser.add_argument("--cleanup", choices=cleanup.LEVELS, default=None,
                         help="after the video is made: clips = delete the voice clips and audio files, all = also "
                              "the source video and dub track (default: CLEANUP in .env, else none)")
+    parser.add_argument("--speaker", choices=("auto", *video_brief.SPEAKERS), default=None,
+                        help="who speaks in the video: male or female helps the translation with forms of "
+                             "address and picks TTS_VOICE_MALE / TTS_VOICE_FEMALE from .env if set; auto "
+                             "lets the video brief guess (default: keep the earlier choice for this video)")
     parser.add_argument("--glossary-only", action="store_true",
                         help="create the job folder and glossary.json, then stop")
     args = parser.parse_args()
@@ -491,9 +530,12 @@ def main():
     args = parse_args()
     preflight()
 
-    video_id = fetch_video_id(args.url)
+    video_id, data = fetch_video(args.url)
     job = JOBS_DIR / video_id
     job.mkdir(parents=True, exist_ok=True)
+    info = save_video_info(job, data, args.speaker)
+    print(f"Title: {info['title'] or '(none)'} | speaker: {info['speaker'] or 'auto'}"
+          + (f" | voice: {voice_for(info['speaker'])}" if voice_for(info["speaker"]) else ""))
     glossary = job / "glossary.json"
     if not glossary.exists():
         # Empty on purpose: the default list holds terms of one specific video.
