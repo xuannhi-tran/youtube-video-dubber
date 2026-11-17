@@ -14,7 +14,7 @@ It is an offline pipeline, not real-time. Speech recognition and the voice run o
 - Optional review model checks the draft translation and lines shortened for timing, fixing wrong or noticeably unnatural Vietnamese.
 - Lines that do not fit their time slot are shortened by the LLM before they are read, so the dub keeps up with the video.
 - Local Vietnamese voice (VieNeu v3 Turbo), on the CPU or on an NVIDIA GPU.
-- Optional Vietnamese subtitles under the picture, original audio turned down (not removed), queue and cleanup in the local web page.
+- Optional Vietnamese subtitles under the picture, original audio turned down (not removed), queue, cleanup and a "Dịch lại" (translate again) button for finished videos in the local web page.
 
 ## Requirements
 
@@ -126,7 +126,7 @@ python dub.py URL --subs                 # burn Vietnamese subtitles in (see bel
 python dub.py URL --glossary-only        # create the job folder and glossary.json, then stop
 ```
 
-`--redo X` redoes stage X and everything after it. Changing `--max-seconds` redoes everything after the download, because the transcript depends on it.
+`--redo X` redoes stage X and everything after it. On the web page, the "Dịch lại" button of a finished video does `--redo transcribe` for you: use it after a prompt, glossary or model change, because sending the same link again only continues a finished job. Changing `--max-seconds` redoes everything after the download, because the transcript depends on it.
 
 ### Files in a job folder
 
