@@ -69,6 +69,7 @@ a { color:var(--accent); }
     </div>
     <details><summary>Tuỳ chọn nâng cao</summary><div class="opts">
       <label><input id="subs" type="checkbox"> Thêm phụ đề tiếng Việt (dải đen dưới video)</label>
+      <label title="Link đã làm rồi: dịch lại bằng prompt mới nhất rồi đọc và xuất lại video (không chạy lại Whisper)"><input id="retranslate" type="checkbox"> Dịch lại (link đã làm rồi)</label>
       <label>Âm gốc <input id="vol" type="number" min="0" max="1" step="0.01" placeholder="0.02"></label>
       <label>Chỉ thử <input id="secs" type="number" min="1" step="1" placeholder="hết"> giây đầu</label>
     </div></details>
@@ -91,7 +92,7 @@ $("form").addEventListener("submit", async ev => {
   ev.preventDefault();
   $("err").textContent = "";
   const body = {url: $("url").value, subs: $("subs").checked, original_volume: $("vol").value, max_seconds: $("secs").value,
-                speaker: $("speaker").value};
+                speaker: $("speaker").value, retranslate: $("retranslate").checked};
   const res = await fetch("/api/jobs", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
   const data = await res.json();
   if (!res.ok) { $("err").textContent = data.error || "Lỗi"; return; }
@@ -234,7 +235,15 @@ async function refresh() {
         if (!res.ok) alert((await res.json()).error || "Không xóa được");
         refresh();
       };
-      const buttons = el("div", "opts"); buttons.append(open, del);
+      const again = el("button", "ghost", "Dịch lại");
+      again.title = "Dịch lại bằng prompt mới nhất rồi đọc và xuất lại video (không chạy lại Whisper)";
+      again.onclick = async () => {
+        if (!confirm(`Dịch lại video ${v.video_id}? Bản dịch, giọng đọc và video sẽ được làm lại (tốn quota model).`)) return;
+        const res = await fetch(`/api/videos/${encodeURIComponent(v.video_id)}/retranslate`, {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+        if (!res.ok) alert((await res.json()).error || "Không dịch lại được");
+        refresh();
+      };
+      const buttons = el("div", "opts"); buttons.append(open, again, del);
       row.append(buttons); card.append(row);
       if (v.exported) card.append(el("div", "note", `Đã chép sang thư mục đồng bộ: ${v.exported}`));
       list.append(card);

@@ -75,7 +75,19 @@ def validate_request(data):
         if speaker not in ("auto", "male", "female"):
             raise ValueError("Người nói phải là tự đoán, nam hoặc nữ.")
         arguments += ["--speaker", speaker]
+    if data.get("retranslate"):
+        # Translate again with the current prompts (Whisper's transcript is kept), then
+        # shorten, read and mux again; without it a finished job is only resumed.
+        arguments += ["--redo", "transcribe"]
     return url, arguments
+
+
+def video_url(video_id, info):
+    """The link a finished video was made from: video_info.json's url, else YouTube's."""
+    url = str((info or {}).get("url") or "").strip() if isinstance(info, dict) else ""
+    if urlparse(url).scheme in ("http", "https"):
+        return url
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 
 def read_progress(progress, line):
@@ -150,6 +162,11 @@ def run_local_checks():
     assert validate_request({"url": "https://x.com/v"})[1] == []
     assert validate_request({"url": "https://x.com/v", "speaker": "female"})[1] == ["--speaker", "female"]
     assert validate_request({"url": "https://x.com/v", "speaker": ""})[1] == []
+    assert validate_request({"url": "https://x.com/v", "retranslate": True})[1] == ["--redo", "transcribe"]
+    assert validate_request({"url": "https://x.com/v", "retranslate": False})[1] == []
+    assert video_url("abc", {"url": "https://www.bilibili.com/video/BV1"}) == "https://www.bilibili.com/video/BV1"
+    assert video_url("abc", {}) == video_url("abc", None) == "https://www.youtube.com/watch?v=abc"
+    assert video_url("abc", {"url": "-o evil"}) == "https://www.youtube.com/watch?v=abc"
     for bad in (None, {}, {"url": "ftp://x"}, {"url": "-o evil"}, {"url": "https://a b"},
                 {"url": "https://x.com", "original_volume": "2"},
                 {"url": "https://x.com", "original_volume": "abc"},
@@ -498,6 +515,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(error)}, 400)
                 return
             self.send_json({"id": JOBS.add(url, arguments)})
+        elif re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/retranslate", path):
+            video_id = path.split("/")[3]
+            folder = JOBS_DIR / video_id
+            if not folder.is_dir():
+                self.send_json({"error": "Không tìm thấy thư mục của video này."}, 404)
+                return
+            if JOBS.in_use(video_id):
+                self.send_json({"error": "Video này đang được làm, đợi xong hoặc hủy job trước."}, 409)
+                return
+            try:
+                info = json.loads((folder / "video_info.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                info = {}
+            self.send_json({"id": JOBS.add(video_url(video_id, info), ["--redo", "transcribe"])})
         elif re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/delete", path):
             video_id = path.split("/")[3]
             if JOBS.in_use(video_id):
