@@ -1,0 +1,5 @@
+# Optional: read the voice on an NVIDIA GPU (TTS_DEVICE=cuda). A few GB.
+#   pip install -r requirements-gpu.txt
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+transformers==5.23.0

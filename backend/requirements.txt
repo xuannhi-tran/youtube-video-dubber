@@ -1,16 +1,13 @@
-# Core (CPU or GPU)
-faster-whisper
-yt-dlp
-vieneu
-httpx
-python-dotenv
-numpy
+# Core (CPU or GPU). Exact versions of a tested setup: requirements-lock.txt
+faster-whisper==1.2.1
+yt-dlp==2026.8.19
+vieneu==3.8.4
+httpx==0.28.1
+python-dotenv==1.2.3
+numpy==2.5.3
 
 # NVIDIA GPU for Whisper (CUDA 12 runtime libraries)
-nvidia-cublas-cu12
-nvidia-cudnn-cu12
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.26.0.51
 
-# Optional: speech on the GPU (TTS_DEVICE=cuda). Install a CUDA build of torch first, e.g.
-#   pip install torch --index-url https://download.pytorch.org/whl/cu128
-# then:
-#   pip install transformers
+# Optional: speech on the GPU (TTS_DEVICE=cuda): pip install -r requirements-gpu.txt
