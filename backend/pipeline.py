@@ -32,7 +32,7 @@ MODELS_ENTRY = "_models"
 # chunks translated with an older prompt are translated again.
 PROMPT_VERSION = 5
 # Same for the review pass (see review_chunk).
-REVIEW_PROMPT_VERSION = 4
+REVIEW_PROMPT_VERSION = 5
 # Whisper is told the video title (first characters only: a long prompt can make it repeat itself).
 WHISPER_TITLE_CHARS = 60
 # A review that changes more lines than this share of a chunk (and more than 3) is rewriting rather
@@ -563,6 +563,11 @@ Do NOT add a pronoun or a person ("ông", "bà", "anh", "chị", "họ") that th
 does not have: a general statement about "a person", "someone" or "people" stays general.
 Do NOT replace the key words of the topic with milder or vaguer ones (if the speaker says
 "bệnh", keep "bệnh").
+Do NOT drop a detail the Chinese line has: when you make a line more natural, keep every
+idea, image and qualifier of the draft that is in the Chinese (盲选 keeps "nhắm mắt", 山洪 stays
+"lũ", not a vaguer word).
+Do NOT change the kind of sentence: a statement stays a statement (never add "liệu",
+"phải chăng" or a question mark), and a question stays a question.
 Leave every line you do not change out of your answer.
 
 Rules for a corrected line:
