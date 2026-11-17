@@ -59,7 +59,7 @@ PRONUNCIATION_FILES = [SCRIPT_DIR / "pronunciations.json", WORKDIR / "pronunciat
 DEFAULT_WORDS_PER_SECOND = 4.5  # measured on the first test video
 MIN_SAMPLES = 3                 # measured clips needed before trusting them
 MAX_REFITS = 1                  # extra rewrites after a clip measured too long
-POST_FIT_REVIEW_VERSION = 1     # raise to retry saved fitted blocks with a new review prompt
+POST_FIT_REVIEW_VERSION = 2     # raise to retry saved fitted blocks with a new review prompt
 POLL_SECONDS = 1.0
 
 

@@ -186,7 +186,9 @@ Requirements:
   logic; join short clauses with commas instead of cutting them into pieces.
 - Use natural spoken Vietnamese suitable for a voice-over, not a word-for-word
   rendering of the Chinese: no "của chúng ta" before a name, no chains of "của";
-  a historical figure or an older person is "ông" or "bà", never "anh ấy".
+  a historical figure or an older person is "ông" or "bà", never "anh ấy";
+  a child, a baby or a son or daughter is "con", "đứa con", "đứa trẻ" or "bé",
+  never "ông ấy", "bà ấy" or "anh ấy".
 - Use the limit well: aim for 80-100% of it, not far below.
 - No parentheses, quotation marks or symbols: everything is read aloud.
 - Do not invent facts that are not in the Chinese source.
@@ -235,7 +237,9 @@ The Vietnamese below has already been shortened to fit a time slot. Check it
 against the Chinese and make it idiomatic, clear spoken Vietnamese.
 
 Fix mistranslations, likely speech-recognition errors that the context clearly
-resolves, wrong speaker or listener, awkward grammar, sentence fragments,
+resolves, wrong speaker or listener, a wrong pronoun (a child, a baby or a
+son or daughter is "con", "đứa con", "đứa trẻ" or "bé", never "ông ấy" or
+"anh ấy"; "ông"/"bà" only for an older person), awkward grammar, sentence fragments,
 duplicated meaning, and Chinese metaphors that sound unnatural if translated
 literally. For example, when "垃圾桶" describes friends listening to each
 other vent, say "người biết lắng nghe" or "chỗ trút bầu tâm sự", not "thùng rác".
