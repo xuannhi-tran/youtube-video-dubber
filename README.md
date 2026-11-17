@@ -18,7 +18,7 @@ It is an offline pipeline, not real-time. Speech recognition and the voice run o
 
 ## Requirements
 
-- **Windows** with Python 3.10+. This is the only platform it has been tested on; Linux/macOS may need small changes (for example in `cuda_dlls.py`).
+- **Windows** with Python 3.10+ (the exact versions in `backend/requirements-lock.txt` were tested on Python 3.14). This is the only platform it has been tested on; Linux/macOS may need small changes (for example in `cuda_dlls.py`).
 - **An NVIDIA GPU** for Whisper: the code loads `large-v3` on CUDA in float16 (about 3 GB download, roughly 4-5 GB of VRAM). Developed on an RTX 4060 Laptop with 8 GB. Reading the voice on the GPU (`TTS_DEVICE=cuda`) is optional and shares the same card. Without a GPU, change `device` in `pipeline.py` and expect it to be much slower.
 - **ffmpeg** and **ffprobe** on your PATH, and **yt-dlp** (installed by pip below).
 - An **LLM**: a free Groq or Gemini API key, or a local model through [Ollama](https://ollama.com) or LM Studio (optional).
@@ -31,7 +31,7 @@ git clone https://github.com/xuannhi-tran/youtube-video-dubber.git
 cd youtube-video-dubber\backend
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements.txt -c requirements-lock.txt
 copy .env.example .env
 ```
 
@@ -208,7 +208,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 The voice (VieNeu) reads on the CPU by default, slightly slower than real time. With an NVIDIA GPU it is about 12 times faster per sentence (measured on an RTX 4060 Laptop: 4 to 5 s of audio in about 0.4 s instead of 4 to 5 s). In the project venv:
 
 ```
-pip install torch==2.11.0 transformers==5.23.0 safetensors --index-url https://download.pytorch.org/whl/cu128 --extra-index-url https://pypi.org/simple
+pip install -r requirements-gpu.txt -c requirements-lock.txt
 python tts_speed_test.py --only cuda     # should print "x real time" well above 1
 ```
 
