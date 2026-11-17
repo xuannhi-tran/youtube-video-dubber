@@ -89,11 +89,21 @@ def read_progress(progress, line):
     return progress
 
 
+# dub.py prints the output of pipeline.py and speech.py with a label in front ("translate | ",
+# "speech    | "); the messages below are what those scripts print themselves.
+SCRIPT_LABEL = re.compile(r"^[a-z]+\s*\| ")
+
+
+def strip_label(line):
+    return SCRIPT_LABEL.sub("", line, count=1)
+
+
 def classify_line(line):
     """'quota' when translation stopped on a limit; 'llm_stopped' when shortening did."""
-    if line.startswith("Quota reached:"):
+    message = strip_label(line)
+    if message.startswith("Quota reached"):  # pipeline.py: "Quota reached (translation): ..."
         return "quota"
-    if line.startswith("LLM stopped ("):
+    if message.startswith("LLM stopped ("):  # speech.py / fit_blocks.py
         return "llm_stopped"
     return None
 
@@ -162,7 +172,12 @@ def run_local_checks():
 
     assert classify_line("Quota reached: daily limit") == "quota"
     assert classify_line("LLM stopped (limit). The remaining blocks") == "llm_stopped"
-    assert classify_line("Chunk 1/6 ...") is None and classify_line("translate | Quota reached: x") is None
+    assert classify_line("Chunk 1/6 ...") is None
+    # The real lines, as dub.py relays them from its scripts.
+    assert classify_line("translate | Quota reached (translation): Gemini daily limit") == "quota"
+    assert classify_line("speech    | LLM stopped (Groq daily limit). The remaining blocks keep their text") == "llm_stopped"
+    assert classify_line("translate | Chunk 3/9: review quota reached (x); keeping the draft translation") is None
+    assert strip_label("translate | Quota reached (translation): x") == "Quota reached (translation): x"
 
     assert parse_range("bytes=0-9", 100) == (0, 9)
     assert parse_range("bytes=90-", 100) == (90, 99)
@@ -196,7 +211,7 @@ class Jobs:
         with self.lock:
             item = {"id": next(self.ids), "url": url, "arguments": arguments, "status": "waiting",
                     "video_id": None, "stage": 0, "stage_name": "", "log": [], "error": "",
-                    "cancel": False, "started": None, "ended": None, "hold": False, "warning": ""}
+                    "cancel": False, "started": None, "ended": None, "hold": False, "warning": "", "quota": False}
             self.items.append(item)
             return item["id"]
 
@@ -260,7 +275,7 @@ class Jobs:
             self.items.append({"id": retry_id, "url": item["url"], "arguments": list(item["arguments"]),
                                "status": "waiting", "video_id": item["video_id"], "stage": 0,
                                "stage_name": "", "log": [], "error": "", "cancel": False,
-                               "started": None, "ended": None, "hold": False, "warning": ""})
+                               "started": None, "ended": None, "hold": False, "warning": "", "quota": False})
             return retry_id
 
     def worker(self):
@@ -278,6 +293,7 @@ class Jobs:
     def run(self, item):
         progress = {"video_id": None, "stage": 0, "stage_name": ""}
         item["error"] = item["warning"] = ""
+        item["quota"] = False
         command = [sys.executable, "-u", str(SCRIPT_DIR / "dub.py"), item["url"], *item["arguments"]]
         environment = {**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"}
         try:
@@ -300,9 +316,9 @@ class Jobs:
                 del item["log"][:-LOG_LINES]
                 kind = classify_line(line)
                 if kind == "quota":
-                    item["error"] = line[:300]
+                    item["error"], item["quota"] = strip_label(line)[:300], True
                 elif kind == "llm_stopped":
-                    item["warning"] = line[:300]
+                    item["warning"] = strip_label(line)[:300]
         code = process.wait()
         with self.lock:
             self.process = None
@@ -312,7 +328,7 @@ class Jobs:
         elif code == 0 and progress["video_id"] and video.is_file():
             # Shortening hit a limit: the video exists but some lines were not shortened.
             self.finish(item, "done", "", hold=bool(item["warning"]))
-        elif item["error"].startswith("Quota reached:"):
+        elif item.get("quota"):
             self.finish(item, "paused", item["error"])
         else:
             tail = [line for line in item["log"] if line.strip()][-3:]
