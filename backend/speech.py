@@ -168,9 +168,10 @@ def run_local_checks():
     assert words_per_second([4.0, 5.0, 3.0], 4.5) == 4.0
 
     record = new_record("a b")
-    assert record == {"input": "a b", "text": "a b", "fitted": False, "refits": 0, "status": "unchanged"}
+    assert record == {"input": "a b", "text": "a b", "fitted": False, "refits": 0,
+                      "status": "unchanged", "post_fit_review_version": 0}
     saved = {"input": "a b", "text": "a", "fitted": True, "refits": 1, "status": "rewritten"}
-    assert restore_record(saved, "a b") == saved
+    assert restore_record(saved, "a b") == {**new_record("a b"), **saved}
     assert restore_record(saved, "a b c") == new_record("a b c")
     assert restore_record(None, "x") == new_record("x")
     assert restore_record({"input": "x", "text": None}, "x") == new_record("x")
