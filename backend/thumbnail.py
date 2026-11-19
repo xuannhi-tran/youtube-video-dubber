@@ -49,7 +49,7 @@ FIRST, LAST = 0.08, 0.92       # share of the duration the candidates are taken 
 SAMPLE = 256                    # candidates are scored on a SAMPLE x SAMPLE gray picture
 TOO_DARK, TOO_BRIGHT, FLAT = 35.0, 225.0, 14.0   # mean brightness limits and the least contrast (std) of a usable frame
 VERTICAL_FROM = 1.5             # height / width from which a video is cropped instead of padded
-BLUR = "boxblur=luma_radius=40:luma_power=3"
+BLUR = "boxblur=luma_radius=28:luma_power=3"   # light, so the speaker can still be made out in the background
 TEXT_ASS = "thumbnail_text.ass"
 TEXT_FILE = Path("dub_output") / "thumbnail_text.json"    # the written texts, kept so a remake does not ask again
 TEXT_LIMITS = {"title": 9, "topic": 6, "hook": 22}         # most words of each text
@@ -57,15 +57,15 @@ CJK = re.compile(r"[\u3400-\u9fff]")
 SAMPLE_CHARS = 1500            # how much of the translation the text writer reads
 SIDE_MARGIN = 60               # px left and right of the texts
 CENTER_Y = 980                 # middle of the title + topic block: the middle of the picture, as on the TikTok covers
-SAFE_BOTTOM = 1540             # the bottom 380 px belong to TikTok's caption: the hook ends above this
-HOOK_GAP = 260                 # px between the topic line and the hook (less when the hook would pass SAFE_BOTTOM)
+SAFE_BOTTOM = 1560             # the bottom 380 px belong to TikTok's caption: the hook ends above this
+HOOK_GAP = 330                 # px between the topic line and the hook (less when the hook would pass SAFE_BOTTOM)
 FONTS_DIR = SCRIPT_DIR / "fonts"   # Be Vietnam Pro and Lora (SIL Open Font License, with the Vietnamese diacritics)
-TITLE_SIZES, TOPIC_SIZES, HOOK_SIZES = (96, 88, 80, 72, 66, 58), (38, 34), (60, 54, 48, 44)
+TITLE_SIZES, TOPIC_SIZES, HOOK_SIZES = (112, 104, 96, 88, 80, 72, 64), (42, 38), (72, 66, 60, 54, 48, 44)
 TITLE_LINES, TOPIC_LINES, HOOK_LINES = 3, 2, 3
-TITLE_TWO_LINES_FROM, HOOK_TWO_LINES_FROM = 66, 44   # a text is kept to 2 lines unless that needs a smaller font
+TITLE_TWO_LINES_FROM, HOOK_TWO_LINES_FROM = 80, 54   # a text is kept to 2 lines unless that needs a smaller font
 GOLD, SOFT_WHITE = "&H004AA0E8", "&H00D8D8D8"   # ASS colours are BBGGRR: orange-gold E8A04A and light grey
-DIM = "eq=brightness=-0.15:saturation=0.85"      # the picture is darkened so white text reads on any frame
-SHADE = "clip(15+170*pow(Y/H,3),0,190)"          # extra darkness (alpha), strongest at the bottom
+DIM = "eq=brightness=-0.10:saturation=0.90"      # the picture is darkened so white text reads on any frame
+SHADE = "clip(8+125*pow(Y/H,3),0,135)"          # extra darkness (alpha), strongest at the bottom
 
 
 def font(name, default):
@@ -324,10 +324,10 @@ def text_ass(texts):
 
     title = topic = None
     if texts.get("title"):
-        lines, size = fit_lines(texts["title"].upper(), TITLE_SIZES, 0.66, TITLE_LINES, TITLE_TWO_LINES_FROM)
+        lines, size = fit_lines(texts["title"].upper(), TITLE_SIZES, 0.47, TITLE_LINES, TITLE_TWO_LINES_FROM)
         title = (lines, size, len(lines) * size * 1.22)
     if texts.get("topic"):
-        lines, size = fit_lines(texts["topic"].upper(), TOPIC_SIZES, 0.75, TOPIC_LINES)
+        lines, size = fit_lines(texts["topic"].upper(), TOPIC_SIZES, 0.55, TOPIC_LINES)
         topic = (lines, size, len(lines) * size * 1.35)
     gap = 36 if title and topic else 0
     block = sum(part[2] for part in (title, topic) if part) + gap
@@ -339,7 +339,7 @@ def text_ass(texts):
         put("Topic", top, topic[1], False, SOFT_WHITE, sans_medium, 1, 5, topic[0])
         top += topic[2]
     if texts.get("hook"):
-        lines, size = fit_lines(texts["hook"], HOOK_SIZES, 0.46, HOOK_LINES, HOOK_TWO_LINES_FROM)
+        lines, size = fit_lines(texts["hook"], HOOK_SIZES, 0.40, HOOK_LINES, HOOK_TWO_LINES_FROM)
         height = len(lines) * size * 1.4
         put("Hook", min(top + HOOK_GAP, SAFE_BOTTOM - height), size, False, GOLD, serif, 1, 0, lines)
     return (
@@ -455,10 +455,10 @@ def run_local_checks():
     assert "BẠN CÓ ĐANG" in script and "TÂM LÝ KHOA HỌC" in script and "\\N" in script
     assert "&H00FFFFFF" in script and GOLD in script and f"\\pos({WIDTH // 2}," in script
     assert text_ass({"title": "Chỉ có tiêu đề"}).count("Dialogue:") == 1
-    long_lines, long_size = fit_lines("MỘT TIÊU ĐỀ RẤT RẤT DÀI " * 6, TITLE_SIZES, 0.66, TITLE_LINES, TITLE_TWO_LINES_FROM)
+    long_lines, long_size = fit_lines("MỘT TIÊU ĐỀ RẤT RẤT DÀI " * 6, TITLE_SIZES, 0.47, TITLE_LINES, TITLE_TWO_LINES_FROM)
     assert len(long_lines) == TITLE_LINES and long_size == TITLE_SIZES[-1]    # never more lines than allowed
-    assert fit_lines("NGẮN GỌN", TITLE_SIZES, 0.66, TITLE_LINES, TITLE_TWO_LINES_FROM) == (["NGẮN GỌN"], TITLE_SIZES[0])
-    even, size = fit_lines("BẠN CÓ ĐANG TỰ DẰN NHÂN RỐI LOẠN?", TITLE_SIZES, 0.66, TITLE_LINES, TITLE_TWO_LINES_FROM)
+    assert fit_lines("NGẮN GỌN", TITLE_SIZES, 0.47, TITLE_LINES, TITLE_TWO_LINES_FROM) == (["NGẮN GỌN"], TITLE_SIZES[0])
+    even, size = fit_lines("BẠN CÓ ĐANG TỰ DẰN NHÂN RỐI LOẠN?", TITLE_SIZES, 0.47, TITLE_LINES, TITLE_TWO_LINES_FROM)
     assert len(even) == 2 and size >= TITLE_TWO_LINES_FROM and min(map(len, even)) >= 12   # two even lines, not three
     # the title and topic are centred on the picture, the hook stays above TikTok's caption area
     middle = [int(line.split("pos(540,")[1].split(")")[0]) for line in script.splitlines() if "pos(540," in line]
