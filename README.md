@@ -14,6 +14,7 @@ It is an offline pipeline, not real-time. Speech recognition and the voice run o
 - Optional review model checks the draft translation and lines shortened for timing, fixing wrong or noticeably unnatural Vietnamese.
 - Lines that do not fit their time slot are shortened by the LLM before they are read, so the dub keeps up with the video.
 - Local Vietnamese voice (VieNeu v3 Turbo), on the CPU or on an NVIDIA GPU.
+- A vertical 9:16 thumbnail (1080x1920, for TikTok / Shorts) taken from the video itself: the sharpest, well-lit frame over a blurred copy of itself, with an optional big title.
 - Optional Vietnamese subtitles under the picture, original audio turned down (not removed), queue, cleanup and a "Dịch lại" (translate again) button for finished videos in the local web page.
 
 ## Requirements
@@ -113,7 +114,7 @@ python cleanup.py JOB_ID --level clips       # clean a finished job by hand (--a
 - `all` also deletes the source video and the dub track: only `dubbed.mp4`, the translation and small files stay. If you ask for something later (`--subs`, `--original-volume`, `--redo`), `dub.py` downloads the video again and reads the voice again from the saved text; it never translates or shortens again.
 - Nothing is removed unless the video was finished (`dubbed.mp4` exists).
 - On the web page every finished video has a "Xóa" button that deletes its whole folder after a confirmation (not while that video is being made). The list also shows the size of the whole folder.
-- `EXPORT_DIR=C:\Users\you\Google Drive\Dubbed` (the folder must exist) copies every finished `dubbed.mp4` there as `<video id>.mp4` when its job ends. Point it at a folder that a sync app (Google Drive for desktop, OneDrive, Dropbox) uploads and the video is in the cloud with no extra step; the job folder can then be cleaned or deleted, the copy stays (the web page says which videos have one). `python sync_copy.py` copies the videos that were finished before you set it.
+- `EXPORT_DIR=C:\Users\you\Google Drive\Dubbed` (the folder must exist) copies every finished `dubbed.mp4` there as `<video id>.mp4` (and its thumbnail as `<video id>.jpg`) when its job ends. Point it at a folder that a sync app (Google Drive for desktop, OneDrive, Dropbox) uploads and the video is in the cloud with no extra step; the job folder can then be cleaned or deleted, the copy stays (the web page says which videos have one). `python sync_copy.py` copies the videos that were finished before you set it.
 
 ### Redoing a stage
 
@@ -143,7 +144,7 @@ python dub.py URL --glossary-only        # create the job folder and glossary.js
 | `dub_blocks.json`, `dub_blocks_fitted.json` | Blocks before and after shortening. |
 | `block_tts_output/`, `block_tts_duration_results_fitted.json` | The clips and their measured lengths. |
 | `speech_state.json`, `dub_state.json` | Progress, so every stage can resume. |
-| `dub_output/` | `dub_track.wav`, per-block files, `dub_timeline.json` (when each line is spoken), `dub_subs.ass` (with `--subs`) and `dubbed.mp4`. |
+| `dub_output/` | `dub_track.wav`, per-block files, `dub_timeline.json` (when each line is spoken), `dub_subs.ass` (with `--subs`), `thumbnail.jpg` and `dubbed.mp4`. |
 
 Everything under `*_output/`, plus `.env`, audio and video, is git-ignored.
 
@@ -197,11 +198,25 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `SUB_FONT`, `SUB_FONT_SIZE`, `SUB_BAR` | Defaults for `--subs`: font name (default `Arial`), text size and bar height in pixels (0 = automatic). The command-line options win. |
 | `TTS_VOICE` | VieNeu preset voice, default `xuan_vinh` (e.g. `thien_minh`). `python compare_voices.py` lets you listen to every voice. Changing it reads all blocks again (clips are keyed by voice); the speech rate is calibrated per voice. |
 | `CLEANUP` | `none` (default), `clips` or `all`: what to delete after a video is made, see [Freeing disk space](#freeing-disk-space). |
+| `THUMBNAIL` | `1` (default) makes the vertical 9:16 thumbnail after each video, `0` turns it off, see [Vertical thumbnail](#vertical-thumbnail). |
 | `EXPORT_DIR` | Folder (e.g. synced to the cloud) that every finished video is copied to, see [Freeing disk space](#freeing-disk-space). |
 | `TTS_DEVICE` | `cpu` (default, the ONNX engine) or `cuda` to read on the GPU with PyTorch, about 12 times faster per sentence on an RTX 4060 Laptop (see [Reading on the GPU](#reading-on-the-gpu)). GPU clips are kept apart from CPU clips, so switching reads every block again. |
 | `TTS_BATCH` | Blocks read in one pass on the GPU, 1 to 32, default 1 (see [Reading on the GPU](#reading-on-the-gpu)). |
 
 `python llm.py` checks the logic and makes one real call for translation and one for shortening, which is the quickest way to test your settings. `python llm.py --list` lists the models your Groq key can use, `python llm.py --list gemini` the ones your Gemini key can use (copy the name exactly). `python llm.py --limits` sends one tiny request to the Groq translation model (or `--limits MODEL`) and prints the limits Groq reports for your key: requests per day, tokens per minute, and what is left. `backend/.env.example` has every setting with a short comment.
+
+### Vertical thumbnail
+
+After every finished video `dub.py` makes `dub_output/thumbnail.jpg`, a 1080x1920 (9:16) picture for TikTok, Shorts or Reels. About a dozen frames between 8% and 92% of the video are scored (sharp detail counts, black, washed-out and flat frames do not) and the best one is used, taken from the original video so burned-in subtitles never end up in it. A horizontal video is shown in the middle over a blurred, enlarged copy of itself; a vertical video is cropped to fill the picture. Nothing is sent anywhere: it needs only ffmpeg.
+
+```
+python thumbnail.py VIDEO_ID                       # make it for a finished video that has none
+python thumbnail.py VIDEO_ID --force               # pick the frame again
+python thumbnail.py VIDEO_ID --title "Bốn kiểu tâm lý tiền bạc"   # with a big title written on the top
+python dub.py URL --no-thumbnail                   # skip it (or THUMBNAIL=0 in backend/.env)
+```
+
+The thumbnail is kept by `CLEANUP` (it is small), copied to `EXPORT_DIR` as `<video id>.jpg` and deleted together with the job folder by the "Xóa" button (the copy in `EXPORT_DIR` stays, like the video). On the web page each finished video shows it, with a link to download it and a "Tạo thumbnail" / "Làm lại thumbnail" button. It does not detect faces, so a frame with a person looking away can still win: remake it with `--force`, or take your own frame.
 
 ### Reading on the GPU
 
@@ -347,6 +362,7 @@ python compare_translators.py JOB_ID --provider ollama --models qwen3:8b,qwen2.5
 | --- | --- |
 | `web.py` | The local web page described above (`web_ui.html` is its page). |
 | `cleanup.py` | Frees disk space of finished jobs, see [Freeing disk space](#freeing-disk-space). |
+| `thumbnail.py VIDEO_ID` | Makes (or remakes) the vertical thumbnail of a finished video, see [Vertical thumbnail](#vertical-thumbnail). |
 | `sync_copy.py` | Copies finished videos to `EXPORT_DIR` (those not copied yet). |
 | `compare_translators.py JOB_ID` | Translates the same window of a job with several models, side by side, into `translator_compare_output/`. |
 | `eval_translation.py JOB_ID` | Scores a job's translation against a reference you corrected by hand (chrF), see above. |
