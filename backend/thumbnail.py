@@ -5,6 +5,8 @@
     python thumbnail.py VIDEO_ID --redraw        # draw it again with the saved texts (edit thumbnail_text.json first)
     python thumbnail.py VIDEO_ID --title "Bốn kiểu tâm lý tiền bạc"   # your own title, the other texts stay
     python thumbnail.py VIDEO_ID --no-title      # the picture only
+    python thumbnail.py --export                 # every video in EXPORT_DIR without a .jpg yet (job deleted is fine)
+    python thumbnail.py --export ID1 ID2 --force # only these, made again even if they have one
 
 The look follows the usual TikTok cover: the frame darkened (darker towards the bottom), a big white
 UPPER-CASE title in the middle and a small upper-case topic line under it, inside TikTok's safe area
@@ -29,6 +31,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -36,6 +39,7 @@ import numpy as np
 
 import llm
 import mux_dub
+import sync_copy
 import subtitles
 import video_brief
 from workdir import SCRIPT_DIR
@@ -244,24 +248,45 @@ def best_time(scored):
     return best[0]
 
 
-def grab_gray(video, seconds, run=subprocess.run):
+def grab_gray(video, seconds, run=subprocess.run, crop=""):
     """One frame at `seconds` as a SAMPLE x SAMPLE gray numpy array; None when ffmpeg gives nothing."""
     command = ["ffmpeg", "-loglevel", "error", "-ss", f"{seconds:.3f}", "-i", str(video), "-frames:v", "1",
-               "-vf", f"scale={SAMPLE}:{SAMPLE},format=gray", "-f", "rawvideo", "-"]
+               "-vf", f"{crop}scale={SAMPLE}:{SAMPLE},format=gray", "-f", "rawvideo", "-"]
     result = run(command, capture_output=True)
     if result.returncode != 0 or len(result.stdout) != SAMPLE * SAMPLE:
         return None
     return np.frombuffer(result.stdout, dtype=np.uint8).reshape(SAMPLE, SAMPLE)
 
 
-def choose_time(video, duration, grab=grab_gray, times=None):
+def choose_time(video, duration, grab=grab_gray, times=None, crop=""):
     """(seconds of the best frame, how many candidates could be read)."""
     scored = []
     for seconds in (times if times is not None else candidate_times(duration)):
-        gray = grab(video, seconds)
+        gray = grab(video, seconds, crop=crop) if crop else grab(video, seconds)
         if gray is not None:
             scored.append((seconds, frame_score(gray)))
     return best_time(scored), len(scored)
+
+
+USUAL_RATIOS = (16 / 9, 9 / 16, 4 / 3, 3 / 4, 1.0)   # width / height of the pictures a dub starts from
+
+
+def picture_height(width, height):
+    """Height of the picture without the black subtitle bar mux_dub.py adds below it (automatic size), so a
+    dubbed video with subtitles (e.g. 1280x844 = 720 + 124 px bar) gives a frame without the bar."""
+    if not width or not height:
+        return height
+    for picture in range(int(height * 0.8), height):
+        usual = any(abs(width / picture - ratio) < 0.01 for ratio in USUAL_RATIOS)   # not a lucky match
+        if usual and picture + subtitles.even(picture * subtitles.BAR_RATIO) == height:
+            return picture
+    return height
+
+
+def crop_filter(width, height):
+    """'crop=...,' that cuts the subtitle bar off, or '' when there is none."""
+    picture = picture_height(width, height)
+    return f"crop=iw:{picture}:0:0," if picture != height else ""
 
 
 def is_vertical(width, height):
@@ -271,11 +296,13 @@ def is_vertical(width, height):
 def build_filter(width, height, styled=False):
     """The -filter_complex that turns one frame into the WIDTH x HEIGHT picture. `styled` darkens it
     (more towards the bottom) and writes the cover texts of thumbnail_text.ass on it."""
+    crop = crop_filter(width, height)
+    height = picture_height(width, height)
     if is_vertical(width, height):
-        graph = (f"[0:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+        graph = (f"[0:v]{crop}scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
                  f"crop={WIDTH}:{HEIGHT},setsar=1")
     else:
-        graph = (f"[0:v]split[a][b];"
+        graph = (f"[0:v]{crop}split[a][b];"
                  f"[a]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},{BLUR}[bg];"
                  f"[b]scale={WIDTH}:-2[fg];"
                  f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1")
@@ -376,12 +403,14 @@ def source_video(job):
     return None
 
 
-def make(job, title=None, force=False, written_title=None, new_text=None):
+def make(job, title=None, force=False, written_title=None, new_text=None, video=None):
     """Make dub_output/thumbnail.jpg for a finished job; returns its path (the existing one unless `force`).
 
     The picture carries the job's cover texts (title, topic, hook), written by an LLM the first time and kept in
     dub_output/thumbnail_text.json. `title` replaces the title; `written_title=False` or THUMBNAIL_TITLE=0 leaves
     all text off; `force` also writes new texts unless `new_text` is False (draw again with the saved ones).
+
+    `video` takes the frames from another file (e.g. the copy in EXPORT_DIR of a job that was deleted).
 
     Raises RuntimeError when no video is there or ffmpeg fails.
     """
@@ -389,7 +418,7 @@ def make(job, title=None, force=False, written_title=None, new_text=None):
     out = job / OUTPUT_NAME
     if out.is_file() and not force:
         return out
-    video = source_video(job)
+    video = Path(video) if video else source_video(job)
     if video is None:
         raise RuntimeError(f"No video in {job} to take a thumbnail from")
     texts = {}
@@ -404,7 +433,7 @@ def make(job, title=None, force=False, written_title=None, new_text=None):
     info, _ = mux_dub.probe(video)
     size = info.get("video") or {}
     width, height = size.get("width"), size.get("height")
-    seconds, readable = choose_time(video, info.get("duration"))
+    seconds, readable = choose_time(video, info.get("duration"), crop=crop_filter(width, height))
     out.parent.mkdir(parents=True, exist_ok=True)
     temporary = out.with_name("thumbnail.part.jpg")
     with tempfile.TemporaryDirectory() as work:
@@ -526,6 +555,39 @@ def run_local_checks():
             pass
         else:
             raise AssertionError("a job without a video must be refused")
+    # a dubbed video with the subtitle bar: the bar is cut off before anything else
+    assert picture_height(1280, 844) == 720 and picture_height(1920, 1264) == 1080
+    assert picture_height(1280, 720) == 720 and picture_height(1080, 1920) == 1920 and picture_height(None, None) is None
+    assert crop_filter(1280, 844) == "crop=iw:720:0:0," and crop_filter(1280, 720) == ""
+    barred = build_filter(1280, 844)
+    assert barred.startswith("[0:v]crop=iw:720:0:0,split") and build_filter(1280, 720).startswith("[0:v]split")
+    # --export: videos in EXPORT_DIR whose job folder is gone
+    global JOBS_DIR, EXPORT_JOBS_DIR
+    saved_dirs = JOBS_DIR, EXPORT_JOBS_DIR
+    with tempfile.TemporaryDirectory() as root:
+        root = Path(root)
+        JOBS_DIR, EXPORT_JOBS_DIR = root / "jobs", root / "export_jobs"
+        (JOBS_DIR / "kept0000001").mkdir(parents=True)
+        export = root / "Dubbed"
+        export.mkdir()
+        for name in ("gone0000001", "kept0000001", "done0000001"):
+            (export / f"{name}.mp4").write_bytes(b"x")
+        (export / "done0000001.jpg").write_bytes(b"old")
+        calls = []
+        def draw(job, **options):
+            calls.append((Path(job), options["video"]))
+            (Path(job) / OUTPUT_NAME).parent.mkdir(parents=True, exist_ok=True)
+            (Path(job) / OUTPUT_NAME).write_bytes(b"new")
+        fetched = lambda video_id: {"title": f"title of {video_id}", "channel": "C"}
+        made, failed = from_export(folder=export, fetch=fetched, draw=draw)
+        assert made == ["gone0000001", "kept0000001"] and failed == []        # done0000001 already has a .jpg
+        assert calls[0] == (EXPORT_JOBS_DIR / "gone0000001", export / "gone0000001.mp4")
+        assert calls[1][0] == JOBS_DIR / "kept0000001"                       # the job still exists: used
+        assert (export / "gone0000001.jpg").read_bytes() == b"new" and (export / "done0000001.jpg").read_bytes() == b"old"
+        assert read_json(EXPORT_JOBS_DIR / "gone0000001" / "video_info.json", {})["title"] == "title of gone0000001"
+        made, failed = from_export(["done0000001", "nope0000001"], force=True, folder=export, fetch=fetched, draw=draw)
+        assert made == ["done0000001"] and failed == ["nope0000001"] and (export / "done0000001.jpg").read_bytes() == b"new"
+    JOBS_DIR, EXPORT_JOBS_DIR = saved_dirs
     os.environ["THUMBNAIL"] = "0"
     assert not enabled()
     os.environ.pop("THUMBNAIL")
@@ -556,15 +618,89 @@ def real_check():
         assert replaced.is_file() and json.loads((job / TEXT_FILE).read_text(encoding="utf-8"))["topic"] == "Tâm lý"
 
 
+EXPORT_JOBS_DIR = SCRIPT_DIR / "export_thumbnails_output"   # texts of videos whose job folder is gone
+
+
+def fetch_info(video_id, run=subprocess.run):
+    """video_info.json content (title, channel, ...) read from YouTube without downloading; {} on failure."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    result = run([sys.executable, "-m", "yt_dlp", "--no-playlist", "--skip-download", "--dump-single-json", url],
+                 capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        return {}
+    try:
+        return video_brief.info_from_ytdlp(json.loads(result.stdout), "", {})
+    except (ValueError, TypeError):
+        return {}
+
+
+def export_job(video_id):
+    """The folder that holds the texts and thumbnail of `video_id`: its job when it still exists."""
+    job = JOBS_DIR / video_id
+    return job if job.is_dir() else EXPORT_JOBS_DIR / video_id
+
+
+def from_export(video_ids=(), force=False, written_title=None, folder=None, fetch=fetch_info, draw=None):
+    """Thumbnails for the videos in EXPORT_DIR (all, or `video_ids`), also when their job was deleted:
+    the frame comes from the exported video (subtitle bar cut off) and the texts from the YouTube title.
+    Each .jpg is copied next to its video. Returns (made, failed) lists of video ids."""
+    folder = folder if folder is not None else sync_copy.export_dir()
+    if folder is None or not Path(folder).is_dir():
+        raise RuntimeError("EXPORT_DIR is not set or not a folder (backend/.env)")
+    draw = draw or make
+    wanted = set(video_ids)
+    made, failed = [], []
+    for video in sorted(Path(folder).glob("*.mp4")):
+        video_id = video.stem
+        if wanted and video_id not in wanted:
+            continue
+        if video.with_suffix(".jpg").is_file() and not force:
+            continue
+        job = export_job(video_id)
+        job.mkdir(parents=True, exist_ok=True)
+        if not (job / "video_info.json").is_file():
+            info = fetch(video_id)
+            if info:
+                (job / "video_info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n",
+                                                     encoding="utf-8")
+            else:
+                print(f"{video_id}: YouTube title not found; the text is written from the frame's video only",
+                      flush=True)
+        try:
+            draw(job, force=True, written_title=written_title, new_text=None if force else False,
+                 video=None if source_video(job) else video)
+            shutil.copyfile(job / OUTPUT_NAME, video.with_suffix(".jpg"))
+            made.append(video_id)
+        except (RuntimeError, OSError) as error:
+            print(f"{video_id}: no thumbnail ({error})", flush=True)
+            failed.append(video_id)
+    for name in wanted - {video.stem for video in Path(folder).glob("*.mp4")}:
+        print(f"{name}: not in {folder}", flush=True)
+        failed.append(name)
+    return made, failed
+
+
 def main():
     parser = argparse.ArgumentParser(description="Make a vertical thumbnail for a finished video.")
-    parser.add_argument("video_id")
+    parser.add_argument("video_id", nargs="*", help="one job's video id (with --export: any number, default all)")
+    parser.add_argument("--export", action="store_true",
+                        help="for the videos in EXPORT_DIR that have no .jpg yet, also when the job was deleted")
     parser.add_argument("--title", help="write this title on the picture (default: a headline an LLM writes)")
     parser.add_argument("--no-title", action="store_true", help="the picture without any text")
     parser.add_argument("--redraw", action="store_true",
                         help="draw it again with the texts saved in dub_output/thumbnail_text.json (edit them first)")
     parser.add_argument("--force", action="store_true", help="make it again even if there is one")
     args = parser.parse_args()
+    if args.export:
+        try:
+            made, failed = from_export(args.video_id, args.force, False if args.no_title else None)
+        except RuntimeError as error:
+            raise SystemExit(str(error))
+        print(f"\nThumbnails made: {len(made)}" + (f", failed: {', '.join(failed)}" if failed else ""))
+        raise SystemExit(1 if failed else 0)
+    if len(args.video_id) != 1:
+        parser.error("give one video id (or --export)")
+    args.video_id = args.video_id[0]
     folder = JOBS_DIR / args.video_id
     if not folder.is_dir():
         raise SystemExit(f"No job folder {folder}")

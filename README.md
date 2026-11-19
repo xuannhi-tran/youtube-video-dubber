@@ -217,6 +217,7 @@ python thumbnail.py VIDEO_ID --force               # pick the frame and write th
 python thumbnail.py VIDEO_ID --redraw              # draw it again with the saved texts (edit thumbnail_text.json first)
 python thumbnail.py VIDEO_ID --title "Bốn kiểu tâm lý tiền bạc"   # your own title, the other texts stay
 python thumbnail.py VIDEO_ID --no-title            # the picture only
+python thumbnail.py --export                       # every video in EXPORT_DIR without a .jpg yet, even if its job was deleted
 python dub.py URL --no-thumbnail                   # skip it (or THUMBNAIL=0 in backend/.env)
 ```
 
