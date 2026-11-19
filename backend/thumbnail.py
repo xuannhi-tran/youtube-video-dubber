@@ -55,10 +55,14 @@ TEXT_FILE = Path("dub_output") / "thumbnail_text.json"    # the written texts, k
 TEXT_LIMITS = {"title": 9, "topic": 6, "hook": 22}         # most words of each text
 CJK = re.compile(r"[\u3400-\u9fff]")
 SAMPLE_CHARS = 1500            # how much of the translation the text writer reads
-SIDE_MARGIN = 90               # px left and right of the texts (TikTok keeps buttons on the right edge)
-TITLE_Y, HOOK_Y = 800, 1330    # middle of the title block, top of the hook (the bottom 380 px belong to TikTok's caption)
-TITLE_SIZES, TOPIC_SIZES, HOOK_SIZES = (92, 80, 70, 62), (36, 32), (58, 52, 46)
+SIDE_MARGIN = 60               # px left and right of the texts
+CENTER_Y = 980                 # middle of the title + topic block: the middle of the picture, as on the TikTok covers
+SAFE_BOTTOM = 1540             # the bottom 380 px belong to TikTok's caption: the hook ends above this
+HOOK_GAP = 260                 # px between the topic line and the hook (less when the hook would pass SAFE_BOTTOM)
+FONTS_DIR = SCRIPT_DIR / "fonts"   # Be Vietnam Pro and Lora (SIL Open Font License, with the Vietnamese diacritics)
+TITLE_SIZES, TOPIC_SIZES, HOOK_SIZES = (96, 88, 80, 72, 66, 58), (38, 34), (60, 54, 48, 44)
 TITLE_LINES, TOPIC_LINES, HOOK_LINES = 3, 2, 3
+TITLE_TWO_LINES_FROM, HOOK_TWO_LINES_FROM = 66, 44   # a text is kept to 2 lines unless that needs a smaller font
 GOLD, SOFT_WHITE = "&H004AA0E8", "&H00D8D8D8"   # ASS colours are BBGGRR: orange-gold E8A04A and light grey
 DIM = "eq=brightness=-0.15:saturation=0.85"      # the picture is darkened so white text reads on any frame
 SHADE = "clip(15+170*pow(Y/H,3),0,190)"          # extra darkness (alpha), strongest at the bottom
@@ -274,7 +278,7 @@ def build_filter(width, height, styled=False):
         return graph + "[out]"
     return (graph + f",{DIM}[dim];"
             f"color=c=black:s={WIDTH}x{HEIGHT}:d=1,format=rgba,geq=r=0:g=0:b=0:a='{SHADE}'[shade];"
-            f"[dim][shade]overlay,ass={TEXT_ASS}[out]")
+            f"[dim][shade]overlay,ass={TEXT_ASS}:fontsdir=.[out]")
 
 
 def balanced_wrap(text, limit):
@@ -288,43 +292,56 @@ def balanced_wrap(text, limit):
     return subtitles.wrap(text, best)
 
 
-def fit_lines(text, sizes, width_factor, max_lines):
-    """(lines, font size): the biggest size from `sizes` whose wrapped text has at most `max_lines` lines."""
+def fit_lines(text, sizes, width_factor, max_lines, two_lines_from=None):
+    """(lines, font size): the biggest size from `sizes` whose wrapped text fits in few lines. A text goes on
+    2 lines whenever that needs no font smaller than `two_lines_from`; only then are up to `max_lines` allowed."""
     room = WIDTH - 2 * SIDE_MARGIN
-    for size in sizes:
-        limit = max(int(room / (width_factor * size)), 4)
-        if len(subtitles.wrap(text, limit)) <= max_lines:
-            return balanced_wrap(text, limit), size
+    for cap in range(2 if two_lines_from else max_lines, max_lines + 1):
+        for size in sizes:
+            if cap < max_lines and size < two_lines_from:
+                continue
+            limit = max(int(room / (width_factor * size)), 4)
+            if len(subtitles.wrap(text, limit)) <= cap:
+                return balanced_wrap(text, limit), size
     size = sizes[-1]
     lines = subtitles.wrap(text, max(int(room / (width_factor * size)), 4))
     return lines[:max_lines], size   # never more lines than allowed (a text of up to 22 words always fits)
 
 
 def text_ass(texts):
-    """An ASS file with the cover texts in the layout of the TikTok covers: a big white upper-case title in the
-    middle, a small upper-case topic under it and a gold hook sentence lower down."""
-    sans = font("THUMBNAIL_FONT", subtitles.DEFAULT_FONT)    # a font with the Vietnamese diacritics
-    serif = font("THUMBNAIL_HOOK_FONT", "Times New Roman")
+    """An ASS file with the cover texts in the layout of the TikTok covers: a big white upper-case title and a
+    small upper-case topic line, the two together in the middle of the picture, and a gold hook sentence lower down."""
+    sans = font("THUMBNAIL_FONT", "Be Vietnam Pro")    # fonts with all the Vietnamese diacritics (bundled in fonts/)
+    sans_medium = font("THUMBNAIL_TOPIC_FONT", "Be Vietnam Pro Medium")
+    serif = font("THUMBNAIL_HOOK_FONT", "Lora")
     events, styles = [], []
 
     def put(name, y, size, bold, colour, face, outline, spacing, lines):
-        styles.append(f"Style: {name},{face},{size},{colour},{colour},&H00000000,&H96000000,{-1 if bold else 0},0,0,0,"
+        styles.append(f"Style: {name},{face},{size},{colour},{colour},&H00000000,&H78000000,{-1 if bold else 0},0,0,0,"
                       f"100,100,{spacing},0,1,{outline},2,8,{SIDE_MARGIN},{SIDE_MARGIN},0,1")
         body = "\\N".join(subtitles.ass_escape(line) for line in lines)
         events.append(f"Dialogue: 0,0:00:00.00,0:00:10.00,{name},,0,0,0,,{{\\pos({WIDTH // 2},{int(y)})}}{body}")
 
-    bottom = TITLE_Y
+    title = topic = None
     if texts.get("title"):
-        lines, size = fit_lines(texts["title"].upper(), TITLE_SIZES, 0.68, TITLE_LINES)
-        height = len(lines) * size * 1.18
-        put("Title", TITLE_Y - height / 2, size, True, "&H00FFFFFF", sans, 4, 0, lines)
-        bottom = TITLE_Y + height / 2
+        lines, size = fit_lines(texts["title"].upper(), TITLE_SIZES, 0.66, TITLE_LINES, TITLE_TWO_LINES_FROM)
+        title = (lines, size, len(lines) * size * 1.22)
     if texts.get("topic"):
-        lines, size = fit_lines(texts["topic"].upper(), TOPIC_SIZES, 0.78, TOPIC_LINES)
-        put("Topic", bottom + 40, size, False, SOFT_WHITE, sans, 2, 4, lines)
+        lines, size = fit_lines(texts["topic"].upper(), TOPIC_SIZES, 0.75, TOPIC_LINES)
+        topic = (lines, size, len(lines) * size * 1.35)
+    gap = 36 if title and topic else 0
+    block = sum(part[2] for part in (title, topic) if part) + gap
+    top = CENTER_Y - block / 2
+    if title:
+        put("Title", top, title[1], True, "&H00FFFFFF", sans, 2, 0, title[0])
+        top += title[2] + gap
+    if topic:
+        put("Topic", top, topic[1], False, SOFT_WHITE, sans_medium, 1, 5, topic[0])
+        top += topic[2]
     if texts.get("hook"):
-        lines, size = fit_lines(texts["hook"], HOOK_SIZES, 0.5, HOOK_LINES)
-        put("Hook", HOOK_Y, size, False, GOLD, serif, 2, 0, lines)
+        lines, size = fit_lines(texts["hook"], HOOK_SIZES, 0.46, HOOK_LINES, HOOK_TWO_LINES_FROM)
+        height = len(lines) * size * 1.4
+        put("Hook", min(top + HOOK_GAP, SAFE_BOTTOM - height), size, False, GOLD, serif, 1, 0, lines)
     return (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {WIDTH}\nPlayResY: {HEIGHT}\n\n"
@@ -388,6 +405,8 @@ def make(job, title=None, force=False, written_title=None, new_text=None):
     with tempfile.TemporaryDirectory() as work:
         if texts:
             (Path(work) / TEXT_ASS).write_text(text_ass(texts), encoding="utf-8")
+            for face in sorted(FONTS_DIR.glob("*.ttf")):   # libass reads the bundled fonts from the working folder
+                shutil.copy2(face, work)
         result = subprocess.run(build_command(video, seconds, temporary.resolve(), width, height, bool(texts)),
                                 cwd=work, capture_output=True, text=True)
     if result.returncode != 0 or not temporary.is_file():
@@ -428,7 +447,7 @@ def run_local_checks():
     assert command.index("-ss") < command.index("-i") and command[-1] == "o.jpg"
     # layout of the texts
     horizontal = build_filter(1920, 1080, styled=True)
-    assert f"ass={TEXT_ASS}[out]" in horizontal and DIM in horizontal and "geq=" in horizontal
+    assert f"ass={TEXT_ASS}:fontsdir=.[out]" in horizontal and DIM in horizontal and "geq=" in horizontal
     texts = {"title": "Bạn có đang tự dằn nhân rối loạn?", "topic": "Tâm lý khoa học khác thường",
              "hook": "Hôm nay tôi sẽ chỉ cho bạn một cách để thoát khỏi vòng lặp của sự lo âu."}
     script = text_ass(texts)
@@ -436,11 +455,14 @@ def run_local_checks():
     assert "BẠN CÓ ĐANG" in script and "TÂM LÝ KHOA HỌC" in script and "\\N" in script
     assert "&H00FFFFFF" in script and GOLD in script and f"\\pos({WIDTH // 2}," in script
     assert text_ass({"title": "Chỉ có tiêu đề"}).count("Dialogue:") == 1
-    long_lines, long_size = fit_lines("MỘT TIÊU ĐỀ RẤT RẤT DÀI " * 6, TITLE_SIZES, 0.68, TITLE_LINES)
+    long_lines, long_size = fit_lines("MỘT TIÊU ĐỀ RẤT RẤT DÀI " * 6, TITLE_SIZES, 0.66, TITLE_LINES, TITLE_TWO_LINES_FROM)
     assert len(long_lines) == TITLE_LINES and long_size == TITLE_SIZES[-1]    # never more lines than allowed
-    assert fit_lines("NGẮN GỌN", TITLE_SIZES, 0.68, TITLE_LINES) == (["NGẮN GỌN"], TITLE_SIZES[0])
-    even, _ = fit_lines("BẠN CÓ ĐANG TỰ DẰN NHÂN RỐI LOẠN?", TITLE_SIZES, 0.68, TITLE_LINES)
-    assert len(even) == 3 and min(map(len, even)) >= 9   # no lone word on the last line
+    assert fit_lines("NGẮN GỌN", TITLE_SIZES, 0.66, TITLE_LINES, TITLE_TWO_LINES_FROM) == (["NGẮN GỌN"], TITLE_SIZES[0])
+    even, size = fit_lines("BẠN CÓ ĐANG TỰ DẰN NHÂN RỐI LOẠN?", TITLE_SIZES, 0.66, TITLE_LINES, TITLE_TWO_LINES_FROM)
+    assert len(even) == 2 and size >= TITLE_TWO_LINES_FROM and min(map(len, even)) >= 12   # two even lines, not three
+    # the title and topic are centred on the picture, the hook stays above TikTok's caption area
+    middle = [int(line.split("pos(540,")[1].split(")")[0]) for line in script.splitlines() if "pos(540," in line]
+    assert len(middle) == 3 and middle[0] < CENTER_Y < middle[1] + 60 and middle[2] > middle[1]
     # the written texts: parsing, order of the LLMs, saved file
     good = '{"title": "Bạn thuộc kiểu nào?", "topic": "Tâm lý học.", "hook": "Câu hook dài vừa phải thôi nhé."}'
     assert parse_texts(good) == {"title": "Bạn thuộc kiểu nào?", "topic": "Tâm lý học",
