@@ -30,9 +30,9 @@ ANSWER_ATTEMPTS = 3  # fresh requests when the answer is not usable JSON
 MODELS_ENTRY = "_models"
 # Part of every cache key: raise it when the translation prompt changes, so
 # chunks translated with an older prompt are translated again.
-PROMPT_VERSION = 6
+PROMPT_VERSION = 7
 # Same for the review pass (see review_chunk).
-REVIEW_PROMPT_VERSION = 6
+REVIEW_PROMPT_VERSION = 7
 # Whisper is told the video title (first characters only: a long prompt can make it repeat itself).
 WHISPER_TITLE_CHARS = 60
 # A review that changes more lines than this share of a chunk (and more than 3) is rewriting rather
@@ -50,6 +50,8 @@ REVIEW_GIVE_UP_AFTER = 3
 REVIEW_MAX_GROWTH = 1.3
 # Translated segments from the end of the previous chunk shown as context.
 CONTEXT_SEGMENTS = 8
+# Chinese segments from the start of the next chunk shown as context (not translated).
+FOLLOWING_SEGMENTS = 3
 
 # Translation gets surrounding context rather than isolated Whisper segments.
 TARGET_CHUNK_SECONDS = 20
@@ -318,8 +320,9 @@ def context_lines(context):
     return "\n".join(f"{source} => {translation}" for source, translation in context)
 
 
-def build_translation_prompt(chunk, context=(), brief=None):
-    """`brief` = {"about": 'About this video' text, "timing": duration rule} (both optional)."""
+def build_translation_prompt(chunk, context=(), brief=None, following=()):
+    """`brief` = {"about": 'About this video' text, "timing": duration rule} (both optional).
+    `following` = the Chinese of the next few segments, so a sentence that runs on is understood."""
     brief = brief or {}
     input_segments = [
         {
@@ -347,6 +350,12 @@ def build_translation_prompt(chunk, context=(), brief=None):
         f"{context_lines(context)}\n\n"
         if context else ""
     )
+    following_block = (
+        "What the speaker says right after this passage (Chinese, for understanding only, do NOT "
+        "translate it; it shows how the last sentence continues):\n"
+        + "\n".join(following) + "\n\n"
+        if following else ""
+    )
 
     return f"""
 You are the translation component of a video dubbing system. The Vietnamese
@@ -359,6 +368,12 @@ segments.
 How to translate:
 - First understand the whole passage, then translate it as fluent, natural
   spoken Vietnamese (not word-for-word, not subtitle style).
+- Write for a listener who hears each sentence once and cannot read it again: say
+  the idea the way a Vietnamese speaker would explain it, so it is understood at once.
+  When the speaker counts off cases or types ("第一种…", "第二种…", "一是…二是…"),
+  say what the case IS in plain words ("Kiểu thứ hai là những người hay lo lắng, và
+  cách này giúp họ bớt lo"), never a literal frame such as "Dạng thứ hai giải quyết
+  nỗi lo của bạn" that leaves the listener guessing what is meant.
 - Read each complete Vietnamese sentence back as a native speaker would say it.
   Remove duplicated meaning, repeated synonyms and stiff Chinese-derived phrasing;
   for example, say "sâu thẳm trong lòng" once instead of combining it with
@@ -411,7 +426,8 @@ Required format:
 {brief.get("about", "")}{context_block}Chinese transcript to translate:
 
 {json.dumps(input_segments, ensure_ascii=False)}
-"""
+
+{following_block}"""
 
 
 def retry_note(problem, expected):
@@ -425,7 +441,7 @@ def retry_note(problem, expected):
     )
 
 
-def translate_chunk(chunk, model=None, context=(), generate=None, brief=None):
+def translate_chunk(chunk, model=None, context=(), generate=None, brief=None, following=()):
     """Vietnamese for every segment of `chunk`, as [{"start", "end", "text"}, ...].
 
     An unusable answer is asked again (telling the model what was wrong). If a
@@ -433,7 +449,7 @@ def translate_chunk(chunk, model=None, context=(), generate=None, brief=None):
     are easier for a small local model to count.
     """
     generate = generate or (lambda text: llm.generate(text, model=model, role="translate"))
-    prompt = build_translation_prompt(chunk, context, brief)
+    prompt = build_translation_prompt(chunk, context, brief, following)
 
     last_problem = None
     for attempt in range(1, ANSWER_ATTEMPTS + 1):
@@ -460,9 +476,10 @@ def translate_chunk(chunk, model=None, context=(), generate=None, brief=None):
     print(f"Translating this chunk in two halves ({middle} + {len(chunk) - middle} segments)...")
     # The halves keep the video context, but their timing rule would describe the whole chunk.
     halves = {"about": (brief or {}).get("about", "")}
-    first = translate_chunk(chunk[:middle], model, context, generate, halves)
+    ahead = ([item["source_text"] for item in chunk[middle:]] + list(following))[:FOLLOWING_SEGMENTS]
+    first = translate_chunk(chunk[:middle], model, context, generate, halves, ahead)
     joined = list(context) + [(source["source_text"], item["text"]) for source, item in zip(chunk[:middle], first)]
-    second = translate_chunk(chunk[middle:], model, joined[-CONTEXT_SEGMENTS:], generate, halves)
+    second = translate_chunk(chunk[middle:], model, joined[-CONTEXT_SEGMENTS:], generate, halves, following)
     return first + second
 
 
@@ -561,7 +578,10 @@ Change a line when it has one of these problems:
   "anh ấy": use "con", "đứa con", "đứa trẻ" or "bé";
 - it is said to the wrong person: who says what to whom must match the Chinese
   (the speaker "tôi", the audience "bạn"/"chúng ta", other people "họ");
-- a Chinese name or term is written inconsistently.
+- a Chinese name or term is written inconsistently;
+- a listener hearing it once would not understand it at once: a literal frame like
+  "Dạng thứ hai giải quyết nỗi lo của bạn" for "第二种…" must say plainly what the case is
+  ("Kiểu thứ hai là ..."), using what the Chinese says about it.
 Leave a line alone when it is already idiomatic and natural. Do not make cosmetic
 paraphrases for taste alone, but do fix a noticeably awkward line even if its meaning
 is understandable. Make as many corrections as the passage needs.
@@ -837,6 +857,10 @@ def run_local_checks():
     seen = []
     translate_chunk(chunk, generate=lambda p: seen.append(p) or answer(["a", "b", "c"]), brief=extra)
     assert "Title: X" in seen[0] and "- Timing:" in seen[0]
+    assert "right after this passage" not in seen[0]
+    seen.clear()
+    translate_chunk(chunk, generate=lambda p: seen.append(p) or answer(["a", "b", "c"]), following=["下一句"])
+    assert "下一句" in seen[0] and seen[0].index("Chinese transcript to translate:") < seen[0].index("下一句")
     assert whisper_prompt("  每个人  都有病 ") == "每个人 都有病" and whisper_prompt("") is None
     assert len(whisper_prompt("字" * 200)) == WHISPER_TITLE_CHARS
 
@@ -1107,11 +1131,14 @@ def main():
                     f"({start:.2f}s -> {end:.2f}s)..."
                 )
                 try:
-                    translated = translate_chunk(chunk, context=context, brief=briefs[index])
+                    following = [item["source_text"] for item in chunks[index + 1][:FOLLOWING_SEGMENTS]] \
+                        if index + 1 < len(chunks) else []
+                    translated = translate_chunk(chunk, context=context, brief=briefs[index], following=following)
                 except (llm.QuotaExhausted, llm.LLMError, RuntimeError) as error:
                     stop(error, "translation")
-                cache[chunk_key(chunk, current, briefs[index])] = translated
-                remember_model(cache, current)
+                made_by = llm.active_name("translate")  # the fallback LLM once the main one ran out
+                cache[chunk_key(chunk, made_by, briefs[index])] = translated
+                remember_model(cache, made_by)
                 write_json_atomic(CACHE_FILE, cache)
 
             # The next draft is translated with the previous drafts as context, so it never waits for a review.

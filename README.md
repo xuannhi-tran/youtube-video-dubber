@@ -92,7 +92,7 @@ download -> transcribe + translate  ─┐
 | Stage | Script | What it does |
 | --- | --- | --- |
 | 1. download | `dub.py` | `yt-dlp` downloads the video (up to 720p by default) to `source.mp4`; `ffmpeg` extracts 16 kHz mono `source.wav`. |
-| 2. transcribe + translate | `pipeline.py` | faster-whisper (`large-v3`, on the GPU) transcribes the Chinese speech. One LLM call then reads the whole transcript and writes the video brief (summary, speaker, term sheet, misheard words, which are fixed before translating; see [below](#what-the-translator-knows-about-the-whole-video)). The segments are grouped into windows of about 20 seconds and the LLM translates each window into spoken Vietnamese, with the video brief and the previous 8 translated segments as context. With a review model set, each window is then checked (see [Checking the translation](#checking-the-translation)). Every translated window is saved, so an interrupted run does not redo it. Glossary terms (`glossary.py`) are given to both Whisper (as hotwords) and the LLM. |
+| 2. transcribe + translate | `pipeline.py` | faster-whisper (`large-v3`, on the GPU) transcribes the Chinese speech. One LLM call then reads the whole transcript and writes the video brief (summary, speaker, term sheet, misheard words, which are fixed before translating; see [below](#what-the-translator-knows-about-the-whole-video)). The segments are grouped into windows of about 20 seconds and the LLM translates each window into spoken Vietnamese, with the video brief, the previous 8 translated segments and the next 3 Chinese segments as context. With a review model set, each window is then checked (see [Checking the translation](#checking-the-translation)). Every translated window is saved, so an interrupted run does not redo it. Glossary terms (`glossary.py`) are given to both Whisper (as hotwords) and the LLM. |
 | 3. speech | `speech.py` | Starts while translation is still running (`--follow`) and reads blocks as soon as they are translated. Segments are first merged into blocks of about 4-10 s (`dub_block_builder.py`). If a block will not fit its time slot, the LLM shortens it **before** it is read (`fit_blocks.py`); then VieNeu v3 Turbo (voice `xuan_vinh`, on the CPU via ONNX or on the GPU with `TTS_DEVICE=cuda`) reads it and the clip length is measured; a shortened block is checked against the Chinese by the review model (when set) before it is read; a clip that is still too long is shortened once more and read again. The LLM and VieNeu work in parallel, one thread each. |
 | 4. assemble | `assemble_dub.py` | Places the clips on the original timeline into `dub_output/dub_track.wav`: trims silence, keeps at least 0.25 s between clips, lets the dub drift up to 3 s from the original, reads slightly faster (up to 1.1x) when more than 1.5 s behind and up to `--max-speed` (1.3x) only to avoid falling more than 3 s behind, and brings every clip to -20 dBFS. |
 | 5. mux | `mux_dub.py` | Mixes the dub track with the original audio (original at volume 0.02 by default) into `dub_output/dubbed.mp4`. If the video runs longer than the dub, the original audio returns to full volume after the dub ends. |
@@ -189,7 +189,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `VIDEO_BRIEF`, `TRANSLATE_TIMING` | The whole-video brief (on, `0` turns it off) and the per-passage time budget (off, `1` turns it on); see [What the translator knows about the whole video](#what-the-translator-knows-about-the-whole-video). |
 | `TTS_VOICE_FEMALE`, `TTS_VOICE_MALE` | Voice for videos whose speaker was set with `--speaker female` / `male` (or on the web page); empty keeps `TTS_VOICE`. |
 | `TRANSLATE_LLM_REASONING`, `FIT_LLM_REASONING`, `REVIEW_LLM_REASONING` | How hard a Groq or Gemini model may think (`low`, `none`... sent as `reasoning_effort`). Empty keeps the model's default; a value the model does not know makes its requests fail, so remove it if you see errors. |
-| `FIT_FALLBACK_PROVIDER`, `FIT_FALLBACK_MODEL` | Shortening only: if the main LLM runs out of its daily quota, this one takes over for the rest of the run (e.g. `ollama` / `qwen3:8b`). Lines already shortened are kept. The next run tries the main LLM first again. Not available for translation. |
+| `TRANSLATE_FALLBACK_PROVIDER`, `TRANSLATE_FALLBACK_MODEL`, `FIT_FALLBACK_PROVIDER`, `FIT_FALLBACK_MODEL` | If the main translation or shortening LLM runs out of its daily quota, this one takes over for the rest of the run (e.g. `gemini` / `gemini-3.5-flash-lite`, or `ollama` / `qwen3:8b`). Work already done is kept; translations made by the fallback are saved under its name, and `--retranslate` translates them again with the main model. The next run tries the main LLM first again. |
 | `LLM_MAX_TOKENS` | Cap on the answer length (some Groq models allow very little per minute). |
 | `GROQ_API_URL` | Any OpenAI-compatible chat endpoint instead of Groq's. |
 | `GEMINI_RPM` | Requests per minute this process may send to Gemini (default 10, the free Flash Lite limit is 15). |
@@ -201,7 +201,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `TTS_DEVICE` | `cpu` (default, the ONNX engine) or `cuda` to read on the GPU with PyTorch, about 12 times faster per sentence on an RTX 4060 Laptop (see [Reading on the GPU](#reading-on-the-gpu)). GPU clips are kept apart from CPU clips, so switching reads every block again. |
 | `TTS_BATCH` | Blocks read in one pass on the GPU, 1 to 32, default 1 (see [Reading on the GPU](#reading-on-the-gpu)). |
 
-`python llm.py` checks the logic and makes one real call for translation and one for shortening, which is the quickest way to test your settings. `python llm.py --list` lists the models your Groq key can use, `python llm.py --list gemini` the ones your Gemini key can use (copy the name exactly). `backend/.env.example` has every setting with a short comment.
+`python llm.py` checks the logic and makes one real call for translation and one for shortening, which is the quickest way to test your settings. `python llm.py --list` lists the models your Groq key can use, `python llm.py --list gemini` the ones your Gemini key can use (copy the name exactly). `python llm.py --limits` sends one tiny request to the Groq translation model (or `--limits MODEL`) and prints the limits Groq reports for your key: requests per day, tokens per minute, and what is left. `backend/.env.example` has every setting with a short comment.
 
 ### Reading on the GPU
 
@@ -225,11 +225,17 @@ Then put `TTS_DEVICE=cuda` in `backend/.env`. `dub.py` checks at the start that 
 Translation needs the model to understand context (names, terms, sentence boundaries) and is the stage where small local models struggle most; shortening is many short calls and uses quota quickly. A setup that spreads the free quotas:
 
 ```
-TRANSLATE_LLM_PROVIDER=gemini
-TRANSLATE_LLM_MODEL=gemini-3.5-flash-lite
+TRANSLATE_LLM_PROVIDER=groq
+TRANSLATE_LLM_MODEL=qwen/qwen3.8-27b
+TRANSLATE_FALLBACK_PROVIDER=gemini
+TRANSLATE_FALLBACK_MODEL=gemini-3.5-flash-lite
+REVIEW_LLM_PROVIDER=gemini
+REVIEW_LLM_MODEL=gemini-3.1-flash-lite
 FIT_LLM_PROVIDER=groq
 FIT_LLM_MODEL=openai/gpt-oss-120b
 ```
+
+In side-by-side tests Qwen 3.8 27B on Groq translated noticeably more naturally than Gemini Flash Lite, and fast. Groq limits each model separately (by default about 1,000 requests and 200,000 tokens a day, and 8,000 tokens a minute; `python llm.py --limits` shows yours), so Qwen for translation and gpt-oss for shortening do not share a budget. A 20-second window costs a few thousand tokens, so the per-minute limit makes translation wait now and then; that is handled automatically.
 
 with a local Ollama model as the fallback: for shortening, set `FIT_FALLBACK_PROVIDER=ollama` and `FIT_FALLBACK_MODEL=qwen3:8b` and it switches by itself when the main model hits its daily limit (Ollama must be running; `dub.py` warns at the start if it is not). Otherwise, if a stage stops on a daily limit, run again with `TRANSLATE_LLM_PROVIDER=ollama` (or `FIT_LLM_PROVIDER=ollama`); windows already translated by another model are kept. Gemini limits differ a lot between models and accounts (a lite model usually allows far more requests per minute and per day than a full one); check yours in AI Studio and pick the model accordingly. A per-minute limit is waited out automatically; a per-day limit stops the run with a message, keeping everything finished (the free tier resets at midnight Pacific time). Requests are spaced to `GEMINI_RPM`; translation and speech run as separate processes, so keep that in mind if both use Gemini.
 
