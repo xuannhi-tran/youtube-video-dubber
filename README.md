@@ -14,7 +14,7 @@ It is an offline pipeline, not real-time. Speech recognition and the voice run o
 - Optional review model checks the draft translation and lines shortened for timing, fixing wrong or noticeably unnatural Vietnamese.
 - Lines that do not fit their time slot are shortened by the LLM before they are read, so the dub keeps up with the video.
 - Local Vietnamese voice (VieNeu v3 Turbo), on the CPU or on an NVIDIA GPU.
-- A vertical 9:16 thumbnail (1080x1920, for TikTok / Shorts) taken from the video itself: the sharpest, well-lit frame over a blurred copy of itself, with a short white title an LLM writes from the video.
+- A vertical 9:16 thumbnail (1080x1920, for TikTok / Shorts) taken from the video itself: the sharpest, well-lit frame over a blurred copy of itself, with a white title, a topic line and a hook sentence an LLM writes from the video.
 - Optional Vietnamese subtitles under the picture, original audio turned down (not removed), queue, cleanup and a "Dịch lại" (translate again) button for finished videos in the local web page.
 
 ## Requirements
@@ -198,7 +198,7 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 | `SUB_FONT`, `SUB_FONT_SIZE`, `SUB_BAR` | Defaults for `--subs`: font name (default `Arial`), text size and bar height in pixels (0 = automatic). The command-line options win. |
 | `TTS_VOICE` | VieNeu preset voice, default `xuan_vinh` (e.g. `thien_minh`). `python compare_voices.py` lets you listen to every voice. Changing it reads all blocks again (clips are keyed by voice); the speech rate is calibrated per voice. |
 | `CLEANUP` | `none` (default), `clips` or `all`: what to delete after a video is made, see [Freeing disk space](#freeing-disk-space). |
-| `THUMBNAIL`, `THUMBNAIL_TITLE` | `1` (default) makes the vertical 9:16 thumbnail after each video, `0` turns it off; `THUMBNAIL_TITLE=0` keeps the picture but writes no title. `THUMBNAIL_LLM_PROVIDER` / `THUMBNAIL_LLM_MODEL` choose the LLM that writes it. See [Vertical thumbnail](#vertical-thumbnail). |
+| `THUMBNAIL`, `THUMBNAIL_TITLE` | `1` (default) makes the vertical 9:16 thumbnail after each video, `0` turns it off; `THUMBNAIL_TITLE=0` keeps the picture but writes no text on it. `THUMBNAIL_LLM_PROVIDER` / `THUMBNAIL_LLM_MODEL` choose the LLM that writes it, `THUMBNAIL_FONT` / `THUMBNAIL_HOOK_FONT` the fonts. See [Vertical thumbnail](#vertical-thumbnail). |
 | `EXPORT_DIR` | Folder (e.g. synced to the cloud) that every finished video is copied to, see [Freeing disk space](#freeing-disk-space). |
 | `TTS_DEVICE` | `cpu` (default, the ONNX engine) or `cuda` to read on the GPU with PyTorch, about 12 times faster per sentence on an RTX 4060 Laptop (see [Reading on the GPU](#reading-on-the-gpu)). GPU clips are kept apart from CPU clips, so switching reads every block again. |
 | `TTS_BATCH` | Blocks read in one pass on the GPU, 1 to 32, default 1 (see [Reading on the GPU](#reading-on-the-gpu)). |
@@ -207,17 +207,20 @@ GEMINI_API_KEY=...        # used when LLM_PROVIDER=gemini
 
 ### Vertical thumbnail
 
-After every finished video `dub.py` makes `dub_output/thumbnail.jpg`, a 1080x1920 (9:16) picture for TikTok, Shorts or Reels. About a dozen frames between 8% and 92% of the video are scored (sharp detail counts, black, washed-out and flat frames do not) and the best one is used, taken from the original video so burned-in subtitles never end up in it. A horizontal video is shown in the middle over a blurred, enlarged copy of itself; a vertical video is cropped to fill the picture. The picture itself needs only ffmpeg. The **title** is a Vietnamese headline of 4 to 8 words, white with a black outline, that the LLM writes from the original title, the video brief and the start of the translation; it is told to make people curious without promising what the video does not say. On a horizontal video it sits in the blurred strip above the picture, so it never covers the speaker; on a vertical video it is near the top, clear of the TikTok buttons. It costs one small request per video, uses the translation LLM (then the review LLM if the first fails; or `THUMBNAIL_LLM_PROVIDER` / `THUMBNAIL_LLM_MODEL`), and is saved in `dub_output/thumbnail_title.txt` and reused; to change it pass your own with `--title "..."`, or use `--force` to pick the frame and write the headline again. If the LLM fails, the picture is made without a title and the log says so. `THUMBNAIL_TITLE=0` turns the written title off.
+After every finished video `dub.py` makes `dub_output/thumbnail.jpg`, a 1080x1920 (9:16) cover for TikTok, Shorts or Reels, in the style of the usual TikTok covers: the frame darkened (darker towards the bottom), a big white upper-case **title** in the middle, a small upper-case **topic** line under it and a gold **hook** sentence lower down, all clear of TikTok's caption and buttons. About a dozen frames between 8% and 92% of the video are scored (sharp detail counts, black, washed-out and flat frames do not) and the best one is used, taken from the original video so burned-in subtitles never end up in it. A horizontal video is shown in the middle over a blurred, enlarged copy of itself; a vertical video is cropped to fill the picture.
+
+The three texts are written by an LLM from the original title, the video brief and the start of the translation: a title of 4 to 8 words that makes people curious without promising what the video does not say, a topic label of 2 to 5 words, and one sentence of the video's key idea as the hook. It costs one small request per video, uses the translation LLM (then the review LLM if the first fails; or `THUMBNAIL_LLM_PROVIDER` / `THUMBNAIL_LLM_MODEL`), and the texts are saved in `dub_output/thumbnail_text.json`. If the LLM fails the picture is made without text and the log says so; `THUMBNAIL_TITLE=0` turns the text off. The fonts are Arial and Times New Roman (both have all the Vietnamese diacritics); `THUMBNAIL_FONT` and `THUMBNAIL_HOOK_FONT` choose others.
 
 ```
 python thumbnail.py VIDEO_ID                       # make it for a finished video that has none
-python thumbnail.py VIDEO_ID --force               # pick the frame and write the headline again
-python thumbnail.py VIDEO_ID --title "Bốn kiểu tâm lý tiền bạc"   # your own title instead of the written one
+python thumbnail.py VIDEO_ID --force               # pick the frame and write the texts again
+python thumbnail.py VIDEO_ID --redraw              # draw it again with the saved texts (edit thumbnail_text.json first)
+python thumbnail.py VIDEO_ID --title "Bốn kiểu tâm lý tiền bạc"   # your own title, the topic and hook stay
 python thumbnail.py VIDEO_ID --no-title            # the picture only
 python dub.py URL --no-thumbnail                   # skip it (or THUMBNAIL=0 in backend/.env)
 ```
 
-The thumbnail is kept by `CLEANUP` (it is small), copied to `EXPORT_DIR` as `<video id>.jpg` and deleted together with the job folder by the "Xóa" button (the copy in `EXPORT_DIR` stays, like the video). On the web page each finished video shows it, with a link to download it and a "Tạo thumbnail" / "Làm lại thumbnail" button. It does not detect faces, so a frame with a person looking away can still win: remake it with `--force`, or take your own frame.
+The thumbnail is kept by `CLEANUP` (it is small), copied to `EXPORT_DIR` as `<video id>.jpg` and deleted together with the job folder by the "Xóa" button (the copy in `EXPORT_DIR` stays, like the video). On the web page each finished video shows it, with a link to download it and a "Tạo thumbnail" / "Làm lại thumbnail" button (the second one picks the frame and writes the texts again). It does not detect faces, so on a horizontal video the text can sit over the speaker, and a frame with a person looking away can still win: remake it with `--force`. The faint Chinese characters and the small line at the top that some covers have are not drawn.
 
 ### Reading on the GPU
 

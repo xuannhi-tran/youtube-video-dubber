@@ -1,14 +1,16 @@
-"""A vertical (9:16) thumbnail picked from the video itself.
+"""A vertical (9:16) cover picture made from the video itself.
 
     python thumbnail.py VIDEO_ID                 # make dub_output/thumbnail.jpg for a finished job
-    python thumbnail.py VIDEO_ID --force         # make it again with a new frame and headline (kept otherwise)
-    python thumbnail.py VIDEO_ID --title "Bốn kiểu tâm lý tiền bạc"   # your own title instead of the written one
+    python thumbnail.py VIDEO_ID --force         # make it again: a new frame and new texts (kept otherwise)
+    python thumbnail.py VIDEO_ID --redraw        # draw it again with the saved texts (edit thumbnail_text.json first)
+    python thumbnail.py VIDEO_ID --title "Bốn kiểu tâm lý tiền bạc"   # your own title, the other texts stay
     python thumbnail.py VIDEO_ID --no-title      # the picture only
 
-The title: a short Vietnamese headline (4 to 8 words, white with a black outline) that an LLM writes from the
-video's title, its brief and the start of the Vietnamese translation. It is written once and kept in
-dub_output/thumbnail_title.txt and reused (--title gives your own, --force writes a new one). THUMBNAIL_TITLE=0 turns the
-written title off; when the LLM fails the picture is made without a title.
+The look follows the usual TikTok cover: the frame darkened (darker towards the bottom), a big white
+UPPER-CASE title in the middle, a small upper-case topic line under it and a gold hook sentence lower down,
+all inside TikTok's safe area. An LLM writes the three texts from the video's title, its brief and the start
+of the Vietnamese translation; they are kept in dub_output/thumbnail_text.json and reused.
+THUMBNAIL_TITLE=0 leaves the text off; when the LLM fails the picture is made without text.
 
 dub.py makes one after every finished video (THUMBNAIL=0 in backend/.env or --no-thumbnail turns it
 off) and EXPORT_DIR gets a copy next to the video as <video id>.jpg.
@@ -18,7 +20,7 @@ that is sharpest and neither dark nor washed out wins (black fades, blur and fla
 A horizontal video becomes 1080x1920 with the frame in the middle over a blurred, enlarged copy of itself;
 a vertical video is cropped to fill the picture.
 
-Local only: ffmpeg/ffprobe and numpy, no API.
+Needs ffmpeg and numpy; only the texts use an LLM.
 """
 
 import argparse
@@ -35,6 +37,7 @@ import numpy as np
 import llm
 import mux_dub
 import subtitles
+import video_brief
 from workdir import SCRIPT_DIR
 
 
@@ -47,14 +50,22 @@ SAMPLE = 256                    # candidates are scored on a SAMPLE x SAMPLE gra
 TOO_DARK, TOO_BRIGHT, FLAT = 35.0, 225.0, 14.0   # mean brightness limits and the least contrast (std) of a usable frame
 VERTICAL_FROM = 1.5             # height / width from which a video is cropped instead of padded
 BLUR = "boxblur=luma_radius=40:luma_power=3"
-TITLE_FILE = "thumbnail_title.ass"
-TITLE_TEXT = Path("dub_output") / "thumbnail_title.txt"   # the written title, kept so a remake does not ask again
-TITLE_FONT_SIZE = 120
-TITLE_LINE_CHARS = 16
-TITLE_MAX_WORDS = 9
-TITLE_MAX_LINES = 3
+TEXT_ASS = "thumbnail_text.ass"
+TEXT_FILE = Path("dub_output") / "thumbnail_text.json"    # the written texts, kept so a remake does not ask again
+TEXT_LIMITS = {"title": 9, "topic": 6, "hook": 22}         # most words of each text
 CJK = re.compile(r"[\u3400-\u9fff]")
-SAMPLE_CHARS = 1500            # how much of the translation the title writer reads
+SAMPLE_CHARS = 1500            # how much of the translation the text writer reads
+SIDE_MARGIN = 90               # px left and right of the texts (TikTok keeps buttons on the right edge)
+TITLE_Y, HOOK_Y = 800, 1330    # middle of the title block, top of the hook (the bottom 380 px belong to TikTok's caption)
+TITLE_SIZES, TOPIC_SIZES, HOOK_SIZES = (92, 80, 70, 62), (36, 32), (58, 52, 46)
+TITLE_LINES, TOPIC_LINES, HOOK_LINES = 3, 2, 3
+GOLD, SOFT_WHITE = "&H004AA0E8", "&H00D8D8D8"   # ASS colours are BBGGRR: orange-gold E8A04A and light grey
+DIM = "eq=brightness=-0.15:saturation=0.85"      # the picture is darkened so white text reads on any frame
+SHADE = "clip(15+170*pow(Y/H,3),0,190)"          # extra darkness (alpha), strongest at the bottom
+
+
+def font(name, default):
+    return (os.getenv(name) or "").strip() or default
 
 
 def enabled():
@@ -63,7 +74,7 @@ def enabled():
 
 
 def title_enabled():
-    """THUMBNAIL_TITLE in .env: a written title is on unless it is 0 / no / false / off."""
+    """THUMBNAIL_TITLE in .env: the written texts are on unless it is 0 / no / false / off."""
     return (os.getenv("THUMBNAIL_TITLE") or "1").strip().lower() not in ("0", "no", "false", "off")
 
 
@@ -75,7 +86,7 @@ def read_json(path, default):
 
 
 def title_context(job):
-    """What the title writer reads: {"title", "channel", "summary", "excerpt"} of a job (missing parts are "")."""
+    """What the text writer reads: {"title", "channel", "summary", "excerpt"} of a job (missing parts are "")."""
     job = Path(job)
     info = read_json(job / "video_info.json", {})
     brief = read_json(job / "video_brief.json", {}).get("brief") or {}
@@ -97,30 +108,46 @@ def build_title_prompt(context):
              (("title", "Original title (Chinese)"), ("channel", "Channel"), ("summary", "Summary"),
               ("excerpt", "Start of the Vietnamese voice-over")) if context.get(key)]
     return f"""
-You write the headline on the thumbnail of a Vietnamese short video (a dub of a Chinese video).
-Write ONE headline in Vietnamese:
-- 4 to 8 words, in the viewer's own language, natural and easy to read at a glance;
-- it makes people curious about this video's real content, but never promises something the video does not say;
-- no hashtags, emoji, quotation marks, brackets or Chinese characters, and no full stop at the end;
-- start with a capital letter; a "?" or "!" only if it helps.
-Answer with ONLY the headline, nothing else.
+You write the texts on the cover (thumbnail) of a Vietnamese short video (a dub of a Chinese video).
+Answer with ONE JSON object, in Vietnamese:
+
+{{"title": "...", "topic": "...", "hook": "..."}}
+
+- "title": 4 to 8 words, a question or a bold statement that makes people curious about this video's
+  real content, never a promise the video does not keep;
+- "topic": 2 to 5 words naming the subject area, like a section label (e.g. "Tâm lý học", "Lịch sử Trung Hoa");
+- "hook": ONE sentence of 8 to 16 words in simple spoken Vietnamese, taken from the video or the key idea
+  of it, that makes the viewer want to hear the rest;
+- natural Vietnamese a viewer reads at a glance; no hashtags, emoji, quotation marks, brackets or Chinese
+  characters inside the values; no full stop at the end of "title" and "topic".
+Return ONLY the JSON object.
 
 {chr(10).join(parts)}
 """
 
 
-def clean_title(answer):
-    """The headline inside the model's answer, or "" when it is not usable (empty, Chinese, too long)."""
+def clean_text(value, max_words, capital=True):
+    """One cover text made tidy; "" when it is empty, has Chinese characters or is too long."""
+    text = re.sub(r"[#\"“”«»`*_\[\]<>{}]", "", str(value or ""))
+    text = " ".join(text.split()).strip(" ,;:…-–")
+    if not text or CJK.search(text) or len(text.split()) > max_words:
+        return ""
+    return text[0].upper() + text[1:] if capital else text
+
+
+def parse_texts(answer):
+    """{"title", "topic", "hook"} from the model's answer (a field it got wrong is ""), or {} without a usable title."""
     text = re.sub(r"<(think|thought)>.*?</\1>", "", answer or "", flags=re.S)
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-    if not lines:
-        return ""
-    title = re.sub(r"^(tiêu đề|headline|title)\s*:\s*", "", lines[0], flags=re.IGNORECASE)
-    title = re.sub(r"[#\"“”«»'`*_\[\]()<>{}]", "", title)
-    title = " ".join(title.split()).rstrip(".,;:…-– ")
-    if not title or CJK.search(title) or len(title.split()) > TITLE_MAX_WORDS:
-        return ""
-    return title[0].upper() + title[1:]
+    try:
+        data = video_brief._json_object(text)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    texts = {key: clean_text(data.get(key), limit) for key, limit in TEXT_LIMITS.items()}
+    texts["title"] = texts["title"].rstrip(".")
+    texts["topic"] = texts["topic"].rstrip(".")
+    return texts if texts["title"] else {}
 
 
 def title_writers():
@@ -135,33 +162,40 @@ def title_writers():
     return writers
 
 
-def write_title(context, writers=None):
-    """A headline from the first LLM that gives a usable one; "" when none does (the picture then has no title)."""
+def write_texts(context, writers=None):
+    """The cover texts from the first LLM that gives usable ones; {} when none does (the picture then has no text)."""
     if not any(context.values()):
-        return ""
+        return {}
     prompt = build_title_prompt(context)
     for writer in writers if writers is not None else title_writers():
         try:
-            title = clean_title(writer(prompt))
+            texts = parse_texts(writer(prompt))
         except (llm.QuotaExhausted, llm.LLMError, RuntimeError, ValueError) as error:
-            print(f"Thumbnail title: the LLM failed ({str(error)[:120]})", flush=True)
+            print(f"Thumbnail text: the LLM failed ({str(error)[:120]})", flush=True)
             continue
-        if title:
-            return title
-        print("Thumbnail title: the answer was not usable", flush=True)
-    return ""
+        if texts:
+            return texts
+        print("Thumbnail text: the answer was not usable", flush=True)
+    return {}
 
 
-def job_title(job, new=False, writers=None):
-    """The job's thumbnail title: the saved one, else a new one that is saved. "" when it cannot be written."""
-    path = Path(job) / TITLE_TEXT
-    if not new and path.is_file():
-        return path.read_text(encoding="utf-8").strip()
-    title = write_title(title_context(job), writers)
-    if title:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(title + "\n", encoding="utf-8")
-    return title
+def job_texts(job, new=False, writers=None):
+    """The job's cover texts: the saved ones, else new ones that are saved. {} when they cannot be written."""
+    path = Path(job) / TEXT_FILE
+    saved = read_json(path, {})
+    if not new and isinstance(saved, dict) and saved.get("title"):
+        return {key: str(saved.get(key) or "") for key in TEXT_LIMITS}
+    texts = write_texts(title_context(job), writers)
+    if texts:
+        save_texts(job, texts)
+    return texts
+
+
+def save_texts(job, texts):
+    path = Path(job) / TEXT_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({key: texts.get(key, "") for key in TEXT_LIMITS}, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
 
 
 def candidate_times(duration, count=CANDIDATES):
@@ -225,8 +259,9 @@ def is_vertical(width, height):
     return bool(width and height) and height / width >= VERTICAL_FROM
 
 
-def build_filter(width, height, title=False):
-    """The -filter_complex that turns one frame into the WIDTH x HEIGHT picture."""
+def build_filter(width, height, styled=False):
+    """The -filter_complex that turns one frame into the WIDTH x HEIGHT picture. `styled` darkens it
+    (more towards the bottom) and writes the cover texts of thumbnail_text.ass on it."""
     if is_vertical(width, height):
         graph = (f"[0:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
                  f"crop={WIDTH}:{HEIGHT},setsar=1")
@@ -235,24 +270,61 @@ def build_filter(width, height, title=False):
                  f"[a]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},{BLUR}[bg];"
                  f"[b]scale={WIDTH}:-2[fg];"
                  f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1")
-    return graph + (f",ass={TITLE_FILE}" if title else "") + "[out]"
+    if not styled:
+        return graph + "[out]"
+    return (graph + f",{DIM}[dim];"
+            f"color=c=black:s={WIDTH}x{HEIGHT}:d=1,format=rgba,geq=r=0:g=0:b=0:a='{SHADE}'[shade];"
+            f"[dim][shade]overlay,ass={TEXT_ASS}[out]")
 
 
-def title_place(width, height, lines):
-    """(y of the middle of the title, font size). On a horizontal video the title sits in the blurred band
-    above the picture, so it never covers the speaker; on a vertical one it goes near the top."""
-    if is_vertical(width, height) or not (width and height):
-        return 330, TITLE_FONT_SIZE
-    band = (HEIGHT - round(WIDTH * height / width)) / 2    # the blurred strip above the picture
-    size = int(max(50, min(TITLE_FONT_SIZE, band * 0.8 / (max(lines, 1) * 1.15))))
-    return int(max(band / 2, size * lines * 0.6)), size
+def balanced_wrap(text, limit):
+    """Wrap `text` at `limit` characters, then shrink the limit while the line count stays the same, so the
+    lines come out about equally long (no lone word on the last line)."""
+    lines = subtitles.wrap(text, limit)
+    count = len(lines)
+    best = limit
+    while best > 4 and len(subtitles.wrap(text, best - 1)) == count:
+        best -= 1
+    return subtitles.wrap(text, best)
 
 
-def title_ass(title, font=subtitles.DEFAULT_FONT, width=None, height=None):
-    """An ASS file with `title` big and centred on the picture, white with a black outline (wrapped to a few lines)."""
-    lines = subtitles.wrap(" ".join(title.split()), TITLE_LINE_CHARS)
-    y, size = title_place(width, height, len(lines))
-    text = "{\\an5\\pos(" + f"{WIDTH // 2},{y}" + ")}" + "\\N".join(subtitles.ass_escape(line) for line in lines)
+def fit_lines(text, sizes, width_factor, max_lines):
+    """(lines, font size): the biggest size from `sizes` whose wrapped text has at most `max_lines` lines."""
+    room = WIDTH - 2 * SIDE_MARGIN
+    for size in sizes:
+        limit = max(int(room / (width_factor * size)), 4)
+        if len(subtitles.wrap(text, limit)) <= max_lines:
+            return balanced_wrap(text, limit), size
+    size = sizes[-1]
+    lines = subtitles.wrap(text, max(int(room / (width_factor * size)), 4))
+    return lines[:max_lines], size   # never more lines than allowed (a text of up to 22 words always fits)
+
+
+def text_ass(texts):
+    """An ASS file with the cover texts in the layout of the TikTok covers: a big white upper-case title in the
+    middle, a small upper-case topic under it and a gold hook sentence lower down."""
+    sans = font("THUMBNAIL_FONT", subtitles.DEFAULT_FONT)    # a font with the Vietnamese diacritics
+    serif = font("THUMBNAIL_HOOK_FONT", "Times New Roman")
+    events, styles = [], []
+
+    def put(name, y, size, bold, colour, face, outline, spacing, lines):
+        styles.append(f"Style: {name},{face},{size},{colour},{colour},&H00000000,&H96000000,{-1 if bold else 0},0,0,0,"
+                      f"100,100,{spacing},0,1,{outline},2,8,{SIDE_MARGIN},{SIDE_MARGIN},0,1")
+        body = "\\N".join(subtitles.ass_escape(line) for line in lines)
+        events.append(f"Dialogue: 0,0:00:00.00,0:00:10.00,{name},,0,0,0,,{{\\pos({WIDTH // 2},{int(y)})}}{body}")
+
+    bottom = TITLE_Y
+    if texts.get("title"):
+        lines, size = fit_lines(texts["title"].upper(), TITLE_SIZES, 0.68, TITLE_LINES)
+        height = len(lines) * size * 1.18
+        put("Title", TITLE_Y - height / 2, size, True, "&H00FFFFFF", sans, 4, 0, lines)
+        bottom = TITLE_Y + height / 2
+    if texts.get("topic"):
+        lines, size = fit_lines(texts["topic"].upper(), TOPIC_SIZES, 0.78, TOPIC_LINES)
+        put("Topic", bottom + 40, size, False, SOFT_WHITE, sans, 2, 4, lines)
+    if texts.get("hook"):
+        lines, size = fit_lines(texts["hook"], HOOK_SIZES, 0.5, HOOK_LINES)
+        put("Hook", HOOK_Y, size, False, GOLD, serif, 2, 0, lines)
     return (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {WIDTH}\nPlayResY: {HEIGHT}\n\n"
@@ -260,16 +332,16 @@ def title_ass(title, font=subtitles.DEFAULT_FONT, width=None, height=None):
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, "
         "Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
         "MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Title,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,8,2,8,60,60,200,1\n\n"
+        + "\n".join(styles) + "\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-        f"Dialogue: 0,0:00:00.00,0:00:10.00,Title,,0,0,0,,{text}\n"
+        + "\n".join(events) + "\n"
     )
 
 
-def build_command(video, seconds, out, width, height, title=False):
+def build_command(video, seconds, out, width, height, styled=False):
     return ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{seconds:.3f}", "-i", str(video),
-            "-filter_complex", build_filter(width, height, title), "-map", "[out]",
+            "-filter_complex", build_filter(width, height, styled), "-map", "[out]",
             "-frames:v", "1", "-q:v", "2", str(out)]
 
 
@@ -282,11 +354,12 @@ def source_video(job):
     return None
 
 
-def make(job, title=None, force=False, written_title=None):
+def make(job, title=None, force=False, written_title=None, new_text=None):
     """Make dub_output/thumbnail.jpg for a finished job; returns its path (the existing one unless `force`).
 
-    `title` is the text to write on it. Without one, the job's written title is used (made by an LLM the first
-    time), unless THUMBNAIL_TITLE is off or `written_title` is False; `force` also writes a new title.
+    The picture carries the job's cover texts (title, topic, hook), written by an LLM the first time and kept in
+    dub_output/thumbnail_text.json. `title` replaces the title; `written_title=False` or THUMBNAIL_TITLE=0 leaves
+    all text off; `force` also writes new texts unless `new_text` is False (draw again with the saved ones).
 
     Raises RuntimeError when no video is there or ffmpeg fails.
     """
@@ -297,11 +370,13 @@ def make(job, title=None, force=False, written_title=None):
     video = source_video(job)
     if video is None:
         raise RuntimeError(f"No video in {job} to take a thumbnail from")
+    texts = {}
     if title:
-        (job / TITLE_TEXT).parent.mkdir(parents=True, exist_ok=True)
-        (job / TITLE_TEXT).write_text(title + "\n", encoding="utf-8")
+        saved = read_json(job / TEXT_FILE, {})
+        texts = {**{key: str(saved.get(key) or "") for key in TEXT_LIMITS if isinstance(saved, dict)}, "title": title}
+        save_texts(job, texts)
     elif written_title is not False and title_enabled():
-        title = job_title(job, new=force)
+        texts = job_texts(job, new=force if new_text is None else new_text)
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg was not found on PATH")
     info, _ = mux_dub.probe(video)
@@ -311,9 +386,9 @@ def make(job, title=None, force=False, written_title=None):
     out.parent.mkdir(parents=True, exist_ok=True)
     temporary = out.with_name("thumbnail.part.jpg")
     with tempfile.TemporaryDirectory() as work:
-        if title:
-            (Path(work) / TITLE_FILE).write_text(title_ass(title, width=width, height=height), encoding="utf-8")
-        result = subprocess.run(build_command(video, seconds, temporary.resolve(), width, height, bool(title)),
+        if texts:
+            (Path(work) / TEXT_ASS).write_text(text_ass(texts), encoding="utf-8")
+        result = subprocess.run(build_command(video, seconds, temporary.resolve(), width, height, bool(texts)),
                                 cwd=work, capture_output=True, text=True)
     if result.returncode != 0 or not temporary.is_file():
         temporary.unlink(missing_ok=True)
@@ -348,33 +423,43 @@ def run_local_checks():
     assert f"scale={WIDTH}:-2" in horizontal and "ass=" not in horizontal
     vertical = build_filter(1080, 1920)
     assert "split" not in vertical and f"crop={WIDTH}:{HEIGHT}" in vertical
-    assert build_filter(1920, 1080, title=True).endswith(f",ass={TITLE_FILE}[out]")
     command = build_command("v.mp4", 12.5, "o.jpg", 1920, 1080)
     assert command[:2] == ["ffmpeg", "-y"] and command[command.index("-ss") + 1] == "12.500"
     assert command.index("-ss") < command.index("-i") and command[-1] == "o.jpg"
-    # title layout: in the blurred band above a 16:9 picture, near the top of a vertical one
-    y, size = title_place(1920, 1080, 3)
-    assert 0 < y < 656 and size <= TITLE_FONT_SIZE and y + size * 1.5 < (HEIGHT - 608) / 2 + 40
-    assert title_place(1080, 1920, 3) == (330, TITLE_FONT_SIZE) and title_place(None, None, 2)[0] == 330
-    script = title_ass("Bốn kiểu tâm lý tiền bạc, bạn là kiểu nào?", width=1920, height=1080)
-    assert f"PlayResY: {HEIGHT}" in script and "Dialogue:" in script and "\\N" in script
-    assert "Bốn" in script and "\\an5\\pos(540," in script and "&H00FFFFFF" in script
-    # the written title: cleaning, prompt, order of the LLMs, saved text
-    assert clean_title('"Bốn kiểu tâm lý tiền bạc."') == "Bốn kiểu tâm lý tiền bạc"
-    assert clean_title("Tiêu đề: bạn thuộc kiểu nào?\nGiải thích dài dòng") == "Bạn thuộc kiểu nào?"
-    assert clean_title("<think>hmm</think>Tiền bạc nói gì về bạn") == "Tiền bạc nói gì về bạn"
-    assert clean_title("") == "" and clean_title("四种金钱心理") == "" and clean_title("a b c d e f g h i j") == ""
+    # layout of the texts
+    horizontal = build_filter(1920, 1080, styled=True)
+    assert f"ass={TEXT_ASS}[out]" in horizontal and DIM in horizontal and "geq=" in horizontal
+    texts = {"title": "Bạn có đang tự dằn nhân rối loạn?", "topic": "Tâm lý khoa học khác thường",
+             "hook": "Hôm nay tôi sẽ chỉ cho bạn một cách để thoát khỏi vòng lặp của sự lo âu."}
+    script = text_ass(texts)
+    assert f"PlayResY: {HEIGHT}" in script and script.count("Dialogue:") == 3
+    assert "BẠN CÓ ĐANG" in script and "TÂM LÝ KHOA HỌC" in script and "\\N" in script
+    assert "&H00FFFFFF" in script and GOLD in script and f"\\pos({WIDTH // 2}," in script
+    assert text_ass({"title": "Chỉ có tiêu đề"}).count("Dialogue:") == 1
+    long_lines, long_size = fit_lines("MỘT TIÊU ĐỀ RẤT RẤT DÀI " * 6, TITLE_SIZES, 0.68, TITLE_LINES)
+    assert len(long_lines) == TITLE_LINES and long_size == TITLE_SIZES[-1]    # never more lines than allowed
+    assert fit_lines("NGẮN GỌN", TITLE_SIZES, 0.68, TITLE_LINES) == (["NGẮN GỌN"], TITLE_SIZES[0])
+    even, _ = fit_lines("BẠN CÓ ĐANG TỰ DẰN NHÂN RỐI LOẠN?", TITLE_SIZES, 0.68, TITLE_LINES)
+    assert len(even) == 3 and min(map(len, even)) >= 9   # no lone word on the last line
+    # the written texts: parsing, order of the LLMs, saved file
+    good = '{"title": "Bạn thuộc kiểu nào?", "topic": "Tâm lý học.", "hook": "Câu hook dài vừa phải thôi nhé."}'
+    assert parse_texts(good) == {"title": "Bạn thuộc kiểu nào?", "topic": "Tâm lý học",
+                                 "hook": "Câu hook dài vừa phải thôi nhé."}
+    assert parse_texts("<think>x</think>```json\n" + good + "\n```")["title"] == "Bạn thuộc kiểu nào?"
+    assert parse_texts('{"title": "Ok title", "topic": "四种", "hook": ""}') == {"title": "Ok title", "topic": "", "hook": ""}
+    assert parse_texts('{"title": "四种金钱心理", "topic": "x"}') == {} and parse_texts("no json") == {}
+    assert parse_texts('{"title": "a b c d e f g h i j", "topic": "x"}') == {}   # too many words
     context = {"title": "4种金钱心理模型", "channel": "C", "summary": "Nói về tiền", "excerpt": "Hôm nay"}
     prompt = build_title_prompt(context)
-    assert "4种金钱心理模型" in prompt and "Nói về tiền" in prompt and "ONLY the headline" in prompt
-    assert write_title({"title": "", "channel": "", "summary": "", "excerpt": ""}, [lambda p: "x"]) == ""
+    assert "4种金钱心理模型" in prompt and "Nói về tiền" in prompt and "ONE JSON object" in prompt
+    assert write_texts({"title": "", "channel": "", "summary": "", "excerpt": ""}, [lambda p: good]) == {}
     asked = []
     def broken(prompt):
         asked.append("first")
         raise llm.LLMError("down")
-    assert write_title(context, [broken, lambda p: asked.append("second") or "Tiền bạc nói gì về bạn?"]) == \
-        "Tiền bạc nói gì về bạn?" and asked == ["first", "second"]
-    assert write_title(context, [broken, lambda p: "四种"]) == ""  # nothing usable: no title, no failure
+    assert write_texts(context, [broken, lambda p: asked.append("second") or good])["title"] == "Bạn thuộc kiểu nào?" \
+        and asked == ["first", "second"]
+    assert write_texts(context, [broken, lambda p: "không phải json"]) == {}   # nothing usable: no text, no failure
     with tempfile.TemporaryDirectory() as root:
         job = Path(root)
         (job / "video_info.json").write_text(json.dumps({"title": "T", "channel": "K"}), encoding="utf-8")
@@ -382,11 +467,11 @@ def run_local_checks():
             [{"translated_text": "Câu một."}, {"translated_text": "Câu hai."}]), encoding="utf-8")
         found = title_context(job)
         assert found["title"] == "T" and found["excerpt"] == "Câu một. Câu hai." and found["summary"] == ""
-        assert job_title(job, writers=[lambda p: "Một tiêu đề hay"]) == "Một tiêu đề hay"
-        assert job_title(job, writers=[broken]) == "Một tiêu đề hay"          # saved: nobody is asked again
-        assert job_title(job, new=True, writers=[lambda p: "Tiêu đề mới"]) == "Tiêu đề mới"
-        (job / TITLE_TEXT).unlink()
-        assert job_title(job, writers=[broken]) == ""
+        assert job_texts(job, writers=[lambda p: good])["topic"] == "Tâm lý học"
+        assert job_texts(job, writers=[broken])["title"] == "Bạn thuộc kiểu nào?"       # saved: nobody is asked again
+        assert job_texts(job, new=True, writers=[lambda p: '{"title": "Tiêu đề mới"}'])["title"] == "Tiêu đề mới"
+        (job / TEXT_FILE).unlink()
+        assert job_texts(job, writers=[broken]) == {}
     os.environ["THUMBNAIL_TITLE"] = "off"
     assert not title_enabled()
     os.environ.pop("THUMBNAIL_TITLE")
@@ -432,22 +517,29 @@ def real_check():
         info, _ = mux_dub.probe(out)
         size = info["video"]
         assert (size["width"], size["height"]) == (WIDTH, HEIGHT), size
-        titled = make(job, title="Tiêu đề thử", force=True)
-        assert titled.is_file() and titled.stat().st_size > 0
+        (job / TEXT_FILE).write_text(json.dumps({"title": "Bạn có đang tự dằn nhân rối loạn?", "topic": "Tâm lý",
+                                                  "hook": "Hôm nay tôi chỉ cho bạn một cách."}), encoding="utf-8")
+        titled = make(job, force=True, new_text=False)
+        assert titled.is_file() and titled.stat().st_size > out.stat().st_size // 4
+        replaced = make(job, title="Tiêu đề thử", force=True)
+        assert replaced.is_file() and json.loads((job / TEXT_FILE).read_text(encoding="utf-8"))["topic"] == "Tâm lý"
 
 
 def main():
     parser = argparse.ArgumentParser(description="Make a vertical thumbnail for a finished video.")
     parser.add_argument("video_id")
     parser.add_argument("--title", help="write this title on the picture (default: a headline an LLM writes)")
-    parser.add_argument("--no-title", action="store_true", help="the picture without any title")
+    parser.add_argument("--no-title", action="store_true", help="the picture without any text")
+    parser.add_argument("--redraw", action="store_true",
+                        help="draw it again with the texts saved in dub_output/thumbnail_text.json (edit them first)")
     parser.add_argument("--force", action="store_true", help="make it again even if there is one")
     args = parser.parse_args()
     folder = JOBS_DIR / args.video_id
     if not folder.is_dir():
         raise SystemExit(f"No job folder {folder}")
     try:
-        make(folder, args.title, args.force or bool(args.title), written_title=False if args.no_title else None)
+        make(folder, args.title, args.force or args.redraw or bool(args.title),
+             written_title=False if args.no_title else None, new_text=False if args.redraw or args.title else None)
     except RuntimeError as error:
         raise SystemExit(str(error))
 
