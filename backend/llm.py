@@ -21,10 +21,11 @@ different LLMs; these override LLM_PROVIDER / LLM_MODEL for that job only:
     TRANSLATE_LLM_REASONING=...  FIT_LLM_REASONING=...  REVIEW_LLM_REASONING=...
         (e.g. "low" or "none": how hard a Groq / Gemini model may think; sent as reasoning_effort, empty = default)
 
-Shortening can also fall back to another LLM when its main one runs out of its
-daily limit (the rest of that run, and later runs, try the main LLM first again):
+Translation and shortening can also fall back to another LLM when their main one
+runs out of its daily limit (for the rest of that run; later runs try the main LLM first again):
 
-    FIT_FALLBACK_PROVIDER=ollama   FIT_FALLBACK_MODEL=qwen3:8b
+    TRANSLATE_FALLBACK_PROVIDER=gemini   TRANSLATE_FALLBACK_MODEL=gemini-3.5-flash-lite
+    FIT_FALLBACK_PROVIDER=ollama         FIT_FALLBACK_MODEL=qwen3:8b
 
 Local servers:
 
@@ -33,7 +34,8 @@ Local servers:
     LOCAL_LLM_THINK=0        # 1 lets Qwen3 "think" first (slower; off by default)
 
 Run `python llm.py` to check the local logic and make one real call,
-or `python llm.py --list [groq|gemini]` to list the models your key can use.
+`python llm.py --list [groq|gemini]` to list the models your key can use, or
+`python llm.py --limits [MODEL]` to see a Groq model's real limits (one tiny request).
 """
 
 import os
@@ -182,17 +184,22 @@ def reasoning_setting(role):
     return value or None
 
 
+FALLBACK_ROLES = ("translate", "fit")
+
+
 def fallback_settings(role):
     """(provider, model, api_key) of the role's fallback LLM, or None when none is set.
 
-    Only the "fit" role has one: FIT_FALLBACK_PROVIDER (+ FIT_FALLBACK_MODEL).
+    Translation and shortening can have one: TRANSLATE_FALLBACK_PROVIDER / FIT_FALLBACK_PROVIDER
+    (+ ..._FALLBACK_MODEL; empty = that provider's default model).
     """
-    if role != "fit":
+    if role not in FALLBACK_ROLES:
         return None
-    provider = (os.getenv("FIT_FALLBACK_PROVIDER") or "").strip().lower()
+    prefix = ROLE_PREFIXES[role]
+    provider = (os.getenv(f"{prefix}FALLBACK_PROVIDER") or "").strip().lower()
     if not provider:
         return None
-    return settings(provider, os.getenv("FIT_FALLBACK_MODEL") or None)
+    return settings(provider, os.getenv(f"{prefix}FALLBACK_MODEL") or None)
 
 
 def describe(provider=None, model=None, role=None):
@@ -525,7 +532,7 @@ def generate(prompt, model=None, provider=None, role=None, post=httpx.post, slee
 
     `role` ("translate", "fit" or "review") picks that job's settings, see settings().
     {ROLE}_LLM_REASONING (e.g. REVIEW_LLM_REASONING=low) is sent to Groq and Gemini as reasoning_effort.
-    When the role's main LLM is out of quota and it has a fallback (FIT_FALLBACK_*),
+    When the role's main LLM is out of quota and it has a fallback (TRANSLATE_FALLBACK_*, FIT_FALLBACK_*),
     this and every later call of the process use the fallback.
     """
     explicit = provider is not None or model is not None
@@ -546,6 +553,12 @@ def generate(prompt, model=None, provider=None, role=None, post=httpx.post, slee
         return _generate_with(prompt, fallback, post, sleep, reasoning)
 
 
+def active_name(role):
+    """'provider:model' that answers `role` now: its fallback once the main LLM ran out in this process."""
+    fallback = fallback_settings(role) if role in _switched else None
+    return f"{fallback[0]}:{fallback[1]}" if fallback else describe(role=role)
+
+
 def _generate_with(prompt, chosen, post, sleep, reasoning=None):
     chosen_provider, chosen_model, api_key = chosen
     if chosen_provider == "groq":
@@ -555,6 +568,38 @@ def _generate_with(prompt, chosen, post, sleep, reasoning=None):
     else:
         text = _gemini(prompt, chosen_model, api_key, post, sleep, reasoning)
     return strip_thinking(text)
+
+
+RATE_HEADERS = (
+    ("x-ratelimit-limit-requests", "requests per day"),
+    ("x-ratelimit-remaining-requests", "requests left today"),
+    ("x-ratelimit-reset-requests", "requests reset in"),
+    ("x-ratelimit-limit-tokens", "tokens per minute"),
+    ("x-ratelimit-remaining-tokens", "tokens left this minute"),
+    ("x-ratelimit-reset-tokens", "tokens reset in"),
+)
+
+
+def describe_limits(headers):
+    """Readable lines from Groq's x-ratelimit-* response headers ([] when there are none)."""
+    return [f"{label}: {headers[name]}" for name, label in RATE_HEADERS if headers.get(name) is not None]
+
+
+def groq_limits(model=None, post=httpx.post):
+    """One tiny request to `model` (default: the translation model) and the limits Groq reports with it."""
+    if model is None:
+        provider, model, api_key = settings(role="translate")
+        if provider != "groq":
+            raise LLMError(f"Translation uses {provider}, not Groq; name a Groq model: python llm.py --limits MODEL")
+    else:
+        _, _, api_key = settings("groq", model)
+    body = {"model": model, "messages": [{"role": "user", "content": "Reply with exactly one word: ok"}],
+            "max_completion_tokens": 64}
+    response = post(GROQ_URL, headers={"Authorization": f"Bearer {api_key}"}, json=body, timeout=REQUEST_TIMEOUT)
+    lines = describe_limits(response.headers)
+    if response.status_code != 200 and not lines:
+        raise LLMError(f"Groq error {response.status_code}: {_error_message(response)}")
+    return model, response.status_code, lines
 
 
 # ---------------------------------------------------------
@@ -615,6 +660,29 @@ def _check_fallback(wait):
     _switched.clear()
     os.environ.pop("FIT_FALLBACK_PROVIDER"); os.environ.pop("FIT_FALLBACK_MODEL")
     os.environ.pop("FIT_LLM_PROVIDER"); os.environ.pop("FIT_LLM_MODEL")
+
+    # Translation has its own fallback (Qwen on Groq out of tokens -> Gemini); review has none.
+    os.environ["TRANSLATE_LLM_PROVIDER"], os.environ["TRANSLATE_LLM_MODEL"] = "groq", "qwen/qwen3.8-27b"
+    os.environ["TRANSLATE_FALLBACK_PROVIDER"] = "ollama"  # no model: the provider's default
+    assert fallback_settings("translate")[:2] == ("ollama", DEFAULT_MODELS["ollama"])
+    assert fallback_settings("fit") is None and fallback_settings("review") is None
+    post = _scripted_post(day, _FakeResponse(200, "dịch dự phòng"))
+    assert generate("hi", role="translate", post=post, sleep=wait) == "dịch dự phòng"
+    assert post.calls[0]["json"]["model"] == "qwen/qwen3.8-27b" and "translate" in _switched
+    assert active_name("translate") == f"ollama:{DEFAULT_MODELS['ollama']}"
+    _switched.clear()
+    assert active_name("translate") == "groq:qwen/qwen3.8-27b"
+    os.environ.pop("TRANSLATE_FALLBACK_PROVIDER")
+    os.environ.pop("TRANSLATE_LLM_PROVIDER"); os.environ.pop("TRANSLATE_LLM_MODEL")
+
+    headers = {"x-ratelimit-limit-requests": "1000", "x-ratelimit-limit-tokens": "8000",
+               "x-ratelimit-remaining-tokens": "7990"}
+    assert describe_limits(headers) == ["requests per day: 1000", "tokens per minute: 8000",
+                                        "tokens left this minute: 7990"]
+    assert describe_limits({}) == []
+    post = _scripted_post(_FakeResponse(200, "ok", headers=headers))
+    assert groq_limits("qwen/qwen3.8-27b", post=post)[1:] == (200, describe_limits(headers))
+    assert post.calls[0]["json"]["model"] == "qwen/qwen3.8-27b"
 
 
 def _check_roles_and_local():
@@ -838,7 +906,8 @@ def run_local_checks():
 
     names = ("GROQ_API_KEY", "LLM_PROVIDER", "LLM_MODEL", "LLM_MAX_TOKENS",
              "TRANSLATE_LLM_PROVIDER", "TRANSLATE_LLM_MODEL", "FIT_LLM_PROVIDER", "FIT_LLM_MODEL",
-             "FIT_FALLBACK_PROVIDER", "FIT_FALLBACK_MODEL", "LOCAL_LLM_URL", "LOCAL_LLM_TIMEOUT", "LOCAL_LLM_THINK", "LOCAL_LLM_API_KEY",
+             "FIT_FALLBACK_PROVIDER", "FIT_FALLBACK_MODEL", "TRANSLATE_FALLBACK_PROVIDER", "TRANSLATE_FALLBACK_MODEL",
+             "LOCAL_LLM_URL", "LOCAL_LLM_TIMEOUT", "LOCAL_LLM_THINK", "LOCAL_LLM_API_KEY",
              "GEMINI_API_KEY", "GEMINI_RPM")
     saved = {name: os.environ.get(name) for name in names}
     for name in names:
@@ -919,6 +988,15 @@ def run_local_checks():
 if __name__ == "__main__":
     run_local_checks()
     print("llm local checks passed")
+    if "--limits" in sys.argv[1:]:
+        rest = [arg for arg in sys.argv[1:] if arg != "--limits"]
+        try:
+            name, status, lines = groq_limits(rest[0] if rest else None)
+        except (LLMError, RuntimeError, ValueError) as error:
+            raise SystemExit(f"Failed: {error}")
+        print(f"Groq limits for {name} (answer status {status}):")
+        print("\n".join("  " + line for line in lines) or "  Groq sent no x-ratelimit headers.")
+        raise SystemExit
     if "--list" in sys.argv[1:]:
         names = [arg for arg in sys.argv[1:] if arg in ("groq", "gemini")]
         print("\n".join(list_models(names[0] if names else "groq")))
