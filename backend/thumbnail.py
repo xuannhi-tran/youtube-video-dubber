@@ -244,10 +244,12 @@ def best_time(scored):
     return best[0]
 
 
-def grab_gray(video, seconds, run=subprocess.run):
-    """One frame at `seconds` as a SAMPLE x SAMPLE gray numpy array; None when ffmpeg gives nothing."""
+def grab_gray(video, seconds, run=subprocess.run, crop=None):
+    """One frame at `seconds` as a SAMPLE x SAMPLE gray numpy array; None when ffmpeg gives nothing.
+    `crop` keeps only the top `crop` pixel rows (the picture above a burned-in subtitle bar)."""
+    cut = f"crop=iw:{crop}:0:0," if crop else ""
     command = ["ffmpeg", "-loglevel", "error", "-ss", f"{seconds:.3f}", "-i", str(video), "-frames:v", "1",
-               "-vf", f"scale={SAMPLE}:{SAMPLE},format=gray", "-f", "rawvideo", "-"]
+               "-vf", f"{cut}scale={SAMPLE}:{SAMPLE},format=gray", "-f", "rawvideo", "-"]
     result = run(command, capture_output=True)
     if result.returncode != 0 or len(result.stdout) != SAMPLE * SAMPLE:
         return None
@@ -268,14 +270,16 @@ def is_vertical(width, height):
     return bool(width and height) and height / width >= VERTICAL_FROM
 
 
-def build_filter(width, height, styled=False):
+def build_filter(width, height, styled=False, crop=None):
     """The -filter_complex that turns one frame into the WIDTH x HEIGHT picture. `styled` darkens it
-    (more towards the bottom) and writes the cover texts of thumbnail_text.ass on it."""
+    (more towards the bottom) and writes the cover texts of thumbnail_text.ass on it. `crop` keeps only the
+    top `crop` rows of the frame (`height` is then that cropped height)."""
+    start = f"[0:v]crop=iw:{crop}:0:0[src];[src]" if crop else "[0:v]"
     if is_vertical(width, height):
-        graph = (f"[0:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+        graph = (f"{start}scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
                  f"crop={WIDTH}:{HEIGHT},setsar=1")
     else:
-        graph = (f"[0:v]split[a][b];"
+        graph = (f"{start}split[a][b];"
                  f"[a]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},{BLUR}[bg];"
                  f"[b]scale={WIDTH}:-2[fg];"
                  f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1")
@@ -321,9 +325,11 @@ def text_ass(texts):
     serif = font("THUMBNAIL_HOOK_FONT", "Lora")
     events, styles = [], []
 
-    def put(name, y, size, bold, colour, face, outline, spacing, lines):
-        styles.append(f"Style: {name},{face},{size},{colour},{colour},&H00000000,&H78000000,{-1 if bold else 0},0,0,0,"
-                      f"100,100,{spacing},0,1,{outline},2,8,{SIDE_MARGIN},{SIDE_MARGIN},0,1")
+    def put(name, y, size, bold, colour, face, outline, spacing, lines, box=False):
+        # box: a translucent dark box behind the text (BorderStyle 3), so it stays readable over a busy frame
+        edge = "&H80000000" if box else "&H00000000"
+        styles.append(f"Style: {name},{face},{size},{colour},{colour},{edge},&H78000000,{-1 if bold else 0},0,0,0,"
+                      f"100,100,{spacing},0,{3 if box else 1},{outline},{0 if box else 2},8,{SIDE_MARGIN},{SIDE_MARGIN},0,1")
         body = "\\N".join(subtitles.ass_escape(line) for line in lines)
         events.append(f"Dialogue: 0,0:00:00.00,0:00:10.00,{name},,0,0,0,,{{\\pos({WIDTH // 2},{int(y)})}}{body}")
 
@@ -341,7 +347,7 @@ def text_ass(texts):
         put("Title", top, title[1], True, "&H00FFFFFF", sans, 2, 0, title[0])
         top += title[2] + gap
     if topic:
-        put("Topic", top, topic[1], False, SOFT_WHITE, sans_medium, 1, 5, topic[0])
+        put("Topic", top, topic[1], False, SOFT_WHITE, sans_medium, 10, 5, topic[0], box=True)
         top += topic[2]
     if texts.get("hook") and hook_enabled():
         lines, size = fit_lines(texts["hook"], HOOK_SIZES, 0.40, HOOK_LINES, HOOK_TWO_LINES_FROM)
@@ -361,9 +367,9 @@ def text_ass(texts):
     )
 
 
-def build_command(video, seconds, out, width, height, styled=False):
+def build_command(video, seconds, out, width, height, styled=False, crop=None):
     return ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{seconds:.3f}", "-i", str(video),
-            "-filter_complex", build_filter(width, height, styled), "-map", "[out]",
+            "-filter_complex", build_filter(width, height, styled, crop), "-map", "[out]",
             "-frames:v", "1", "-q:v", "2", str(out)]
 
 
@@ -374,6 +380,23 @@ def source_video(job):
         if path.is_file():
             return path
     return None
+
+
+def subtitle_bar_crop(job, video, video_height):
+    """Rows of the picture above the burned-in subtitle bar, when `video` is the dubbed video of a --subs job
+    (its dub_subs.ass says how tall the original was); None when there is no bar to cut off."""
+    if Path(video).name != "dubbed.mp4":
+        return None   # the original video has no bar
+    try:
+        text = (Path(job) / "dub_output" / "dub_subs.ass").read_text(encoding="utf-8-sig")
+    except OSError:
+        return None
+    total, centre = re.search(r"PlayResY:\s*(\d+)", text), re.search(r"\\pos\(\d+,(\d+)\)", text)
+    if not total or not centre or int(total.group(1)) != video_height:
+        return None   # no cues, or the video was made again without subtitles since
+    height = 2 * int(centre.group(1)) - int(total.group(1))   # the bar is centred: centre = height + bar / 2
+    height -= height % 2
+    return height if 0 < height < video_height else None
 
 
 def make(job, title=None, force=False, written_title=None, new_text=None):
@@ -404,7 +427,10 @@ def make(job, title=None, force=False, written_title=None, new_text=None):
     info, _ = mux_dub.probe(video)
     size = info.get("video") or {}
     width, height = size.get("width"), size.get("height")
-    seconds, readable = choose_time(video, info.get("duration"))
+    crop = subtitle_bar_crop(job, video, height)
+    if crop:
+        height = crop
+    seconds, readable = choose_time(video, info.get("duration"), grab=lambda v, t: grab_gray(v, t, crop=crop))
     out.parent.mkdir(parents=True, exist_ok=True)
     temporary = out.with_name("thumbnail.part.jpg")
     with tempfile.TemporaryDirectory() as work:
@@ -412,7 +438,7 @@ def make(job, title=None, force=False, written_title=None, new_text=None):
             (Path(work) / TEXT_ASS).write_text(text_ass(texts), encoding="utf-8")
             for face in sorted(FONTS_DIR.glob("*.ttf")):   # libass reads the bundled fonts from the working folder
                 shutil.copy2(face, work)
-        result = subprocess.run(build_command(video, seconds, temporary.resolve(), width, height, bool(texts)),
+        result = subprocess.run(build_command(video, seconds, temporary.resolve(), width, height, bool(texts), crop),
                                 cwd=work, capture_output=True, text=True)
     if result.returncode != 0 or not temporary.is_file():
         temporary.unlink(missing_ok=True)
@@ -450,6 +476,21 @@ def run_local_checks():
     command = build_command("v.mp4", 12.5, "o.jpg", 1920, 1080)
     assert command[:2] == ["ffmpeg", "-y"] and command[command.index("-ss") + 1] == "12.500"
     assert command.index("-ss") < command.index("-i") and command[-1] == "o.jpg"
+    # a --subs video made by dub.py: the bar below the picture is cut off when the frame comes from dubbed.mp4
+    with tempfile.TemporaryDirectory() as root:
+        job = Path(root)
+        (job / "dub_output").mkdir()
+        (job / "dub_output" / "dub_subs.ass").write_text(
+            "[Script Info]\nPlayResX: 1280\nPlayResY: 844\n\n[Events]\n"
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Viet,,0,0,0,,{\\an5\\pos(640,782)}Xin chào\n", encoding="utf-8-sig")
+        dubbed, original = job / "dub_output" / "dubbed.mp4", job / "source.mp4"
+        assert subtitle_bar_crop(job, dubbed, 844) == 720                 # 844 = 720 + a 124 px bar
+        assert subtitle_bar_crop(job, original, 844) is None              # the original never has the bar
+        assert subtitle_bar_crop(job, dubbed, 720) is None                # made again without subtitles
+        assert subtitle_bar_crop(job / "none", dubbed, 844) is None
+    cropped = build_filter(1280, 720, crop=720)
+    assert cropped.startswith("[0:v]crop=iw:720:0:0[src];[src]split[a][b];") and cropped.endswith("[out]")
+    assert "crop=iw:" not in build_filter(1280, 720)
     # layout of the texts
     horizontal = build_filter(1920, 1080, styled=True)
     assert f"ass={TEXT_ASS}:fontsdir=.[out]" in horizontal and DIM in horizontal and "geq=" in horizontal
