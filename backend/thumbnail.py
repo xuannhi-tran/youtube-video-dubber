@@ -7,8 +7,8 @@
     python thumbnail.py VIDEO_ID --no-title      # the picture only
 
 The look follows the usual TikTok cover: the frame darkened (darker towards the bottom), a big white
-UPPER-CASE title in the middle, a small upper-case topic line under it and a gold hook sentence lower down,
-all inside TikTok's safe area. An LLM writes the three texts from the video's title, its brief and the start
+UPPER-CASE title in the middle and a small upper-case topic line under it, inside TikTok's safe area
+(THUMBNAIL_HOOK=1 adds a gold hook sentence lower down; it is off by default). An LLM writes the three texts from the video's title, its brief and the start
 of the Vietnamese translation; they are kept in dub_output/thumbnail_text.json and reused.
 THUMBNAIL_TITLE=0 leaves the text off; when the LLM fails the picture is made without text.
 
@@ -82,6 +82,11 @@ def title_enabled():
     return (os.getenv("THUMBNAIL_TITLE") or "1").strip().lower() not in ("0", "no", "false", "off")
 
 
+def hook_enabled():
+    """THUMBNAIL_HOOK in .env: the gold hook sentence at the bottom is off unless it is 1 / yes / true / on."""
+    return (os.getenv("THUMBNAIL_HOOK") or "0").strip().lower() in ("1", "yes", "true", "on")
+
+
 def read_json(path, default):
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -111,18 +116,18 @@ def build_title_prompt(context):
     parts = [f"{label}: {context[key]}" for key, label in
              (("title", "Original title (Chinese)"), ("channel", "Channel"), ("summary", "Summary"),
               ("excerpt", "Start of the Vietnamese voice-over")) if context.get(key)]
+    hook_rule = ('- "hook": ONE sentence of 8 to 16 words in simple spoken Vietnamese, taken from the video or the key idea\n'
+                 '  of it, that makes the viewer want to hear the rest;\n') if hook_enabled() else ""
     return f"""
 You write the texts on the cover (thumbnail) of a Vietnamese short video (a dub of a Chinese video).
 Answer with ONE JSON object, in Vietnamese:
 
-{{"title": "...", "topic": "...", "hook": "..."}}
+{{"title": "...", "topic": "..."{', "hook": "..."' if hook_enabled() else ""}}}
 
 - "title": 4 to 8 words, a question or a bold statement that makes people curious about this video's
   real content, never a promise the video does not keep;
 - "topic": 2 to 5 words naming the subject area, like a section label (e.g. "Tâm lý học", "Lịch sử Trung Hoa");
-- "hook": ONE sentence of 8 to 16 words in simple spoken Vietnamese, taken from the video or the key idea
-  of it, that makes the viewer want to hear the rest;
-- natural Vietnamese a viewer reads at a glance; no hashtags, emoji, quotation marks, brackets or Chinese
+{hook_rule}- natural Vietnamese a viewer reads at a glance; no hashtags, emoji, quotation marks, brackets or Chinese
   characters inside the values; no full stop at the end of "title" and "topic".
 Return ONLY the JSON object.
 
@@ -338,7 +343,7 @@ def text_ass(texts):
     if topic:
         put("Topic", top, topic[1], False, SOFT_WHITE, sans_medium, 1, 5, topic[0])
         top += topic[2]
-    if texts.get("hook"):
+    if texts.get("hook") and hook_enabled():
         lines, size = fit_lines(texts["hook"], HOOK_SIZES, 0.40, HOOK_LINES, HOOK_TWO_LINES_FROM)
         height = len(lines) * size * 1.4
         put("Hook", min(top + HOOK_GAP, SAFE_BOTTOM - height), size, False, GOLD, serif, 1, 0, lines)
@@ -450,7 +455,11 @@ def run_local_checks():
     assert f"ass={TEXT_ASS}:fontsdir=.[out]" in horizontal and DIM in horizontal and "geq=" in horizontal
     texts = {"title": "Bạn có đang tự dằn nhân rối loạn?", "topic": "Tâm lý khoa học khác thường",
              "hook": "Hôm nay tôi sẽ chỉ cho bạn một cách để thoát khỏi vòng lặp của sự lo âu."}
+    assert not hook_enabled() and text_ass(texts).count("Dialogue:") == 2 and "hook" not in build_title_prompt({"title": "T"})
+    os.environ["THUMBNAIL_HOOK"] = "1"
+    assert hook_enabled() and '"hook"' in build_title_prompt({"title": "T"})
     script = text_ass(texts)
+    os.environ.pop("THUMBNAIL_HOOK")
     assert f"PlayResY: {HEIGHT}" in script and script.count("Dialogue:") == 3
     assert "BẠN CÓ ĐANG" in script and "TÂM LÝ KHOA HỌC" in script and "\\N" in script
     assert "&H00FFFFFF" in script and GOLD in script and f"\\pos({WIDTH // 2}," in script
