@@ -18,6 +18,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -26,6 +27,7 @@ from urllib.parse import urlparse
 
 import cleanup
 import sync_copy  # EXPORT_DIR (reads backend/.env)
+import thumbnail
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 JOBS_DIR = SCRIPT_DIR / "dub_jobs_output"  # same folder dub.py uses
@@ -204,6 +206,11 @@ def run_local_checks():
     assert re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/(delete|redo)", "/api/videos/aB-1_x/redo")
     assert not re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/(delete|redo)", "/api/videos/../x/redo")
     assert re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/delete", "/api/videos/aB-1_x/delete")
+    with tempfile.TemporaryDirectory() as root:
+        assert thumbnail_stamp(Path(root)) == 0
+        (Path(root) / thumbnail.OUTPUT_NAME).parent.mkdir()
+        (Path(root) / thumbnail.OUTPUT_NAME).write_bytes(b"jpg")
+        assert thumbnail_stamp(Path(root)) > 0
     assert not re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/delete", "/api/videos/../x/delete")
 
 
@@ -370,6 +377,12 @@ def job_size(folder):
     return measured[1]
 
 
+def thumbnail_stamp(folder):
+    """Modified time of the job's thumbnail (whole seconds), 0 when there is none."""
+    path = folder / thumbnail.OUTPUT_NAME
+    return int(path.stat().st_mtime) if path.is_file() else 0
+
+
 def finished_videos():
     """Videos already on disk, newest first."""
     result = []
@@ -379,6 +392,7 @@ def finished_videos():
             if VIDEO_ID.match(folder.name) and video.is_file():
                 stat = video.stat()
                 result.append({"video_id": folder.name, "size": stat.st_size, "time": stat.st_mtime,
+                               "thumbnail": thumbnail_stamp(folder),
                                "folder_size": job_size(folder),
                                "exported": sync_copy.existing_copy(folder.name)})
     return sorted(result, key=lambda entry: entry["time"], reverse=True)
@@ -457,8 +471,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"jobs": JOBS.snapshot(), "videos": finished_videos()})
         elif path.path.startswith("/video/"):
             self.send_video(path.path[len("/video/"):], "download" in path.query)
+        elif path.path.startswith("/thumbnail/"):
+            self.send_thumbnail(path.path[len("/thumbnail/"):], "download" in path.query)
         else:
             self.send_json({"error": "not found"}, 404)
+
+    def send_thumbnail(self, video_id, as_download):
+        file = JOBS_DIR / video_id / thumbnail.OUTPUT_NAME
+        if not VIDEO_ID.match(video_id) or not file.is_file():
+            self.send_json({"error": "not found"}, 404)
+            return
+        data = file.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        if as_download:
+            self.send_header("Content-Disposition", f'attachment; filename="thumbnail_{video_id}.jpg"')
+        self.end_headers()
+        self.wfile.write(data)
 
     def send_video(self, video_id, as_download):
         file = JOBS_DIR / video_id / "dub_output" / "dubbed.mp4"
@@ -529,6 +560,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             _folder_sizes.pop(video_id, None)
             self.send_json({"ok": True, "freed": freed})
+        elif re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/thumbnail", path):
+            video_id = path.split("/")[3]
+            if not VIDEO_ID.match(video_id) or not (JOBS_DIR / video_id / "dub_output" / "dubbed.mp4").is_file():
+                self.send_json({"error": "Không có video này."}, 404)
+                return
+            try:
+                made = thumbnail.make(JOBS_DIR / video_id, force=True)
+                sync_copy.export_thumbnail(JOBS_DIR / video_id)
+            except (RuntimeError, OSError) as error:
+                self.send_json({"error": f"Không làm được thumbnail: {error}"}, 500)
+                return
+            self.send_json({"ok": True, "file": str(made)})
         elif re.fullmatch(r"/api/videos/[A-Za-z0-9_-]+/redo", path):
             video_id = path.split("/")[3]
             folder = JOBS_DIR / video_id

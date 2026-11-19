@@ -32,6 +32,7 @@ import time
 import cleanup
 import llm
 import sync_copy
+import thumbnail
 import video_brief
 from workdir import SCRIPT_DIR, replace_file
 
@@ -137,6 +138,7 @@ def run_local_checks():
     assert reconcile_state({"done": old_running, "max_seconds": None}, None)["done"] == ["download", "transcribe"]
     assert reconcile_state({"done": ["download", "assemble"], "max_seconds": None}, None)["done"] == ["download"]
 
+    make_thumbnail(Path("no-such-job"), argparse.Namespace(no_thumbnail=True))  # skipped: touches nothing
     assert mux_volume_args(argparse.Namespace(original_volume=None)) == []
     assert mux_volume_args(argparse.Namespace(original_volume=0.04)) == ["--original-volume", 0.04]
     quiet = dict(subs=False, sub_font=None, sub_font_size=None, sub_bar=None, redo=None, original_volume=None)
@@ -469,6 +471,16 @@ def stage_for_missing_files(job, done):
     return None
 
 
+def make_thumbnail(job, args):
+    """The vertical thumbnail of a finished video. A failure here never fails the dub."""
+    if args.no_thumbnail or not thumbnail.enabled():
+        return
+    try:
+        thumbnail.make(job)
+    except (RuntimeError, OSError) as error:
+        print(f"\nNo thumbnail ({error}). Make it later with: python thumbnail.py {Path(job).name}")
+
+
 def stage_actions(url, job, args):
     return {
         "download": lambda: download(url, job, args.max_height),
@@ -508,6 +520,9 @@ def parse_args():
     parser.add_argument("--cleanup", choices=cleanup.LEVELS, default=None,
                         help="after the video is made: clips = delete the voice clips and audio files, all = also "
                              "the source video and dub track (default: CLEANUP in .env, else none)")
+    parser.add_argument("--no-thumbnail", action="store_true",
+                        help="do not make the vertical 9:16 thumbnail (dub_output/thumbnail.jpg) after the video "
+                             "(THUMBNAIL=0 in .env does the same)")
     parser.add_argument("--speaker", choices=("auto", *video_brief.SPEAKERS), default=None,
                         help="who speaks in the video: male or female helps the translation with forms of "
                              "address and picks TTS_VOICE_MALE / TTS_VOICE_FEMALE from .env if set; auto "
@@ -586,7 +601,8 @@ def main():
         finish(name)
 
     result = job / "dub_output" / "dubbed.mp4"
-    copy = sync_copy.export(job)  # before the cleanup; it never removes dubbed.mp4 anyway
+    make_thumbnail(job, args)  # before the cleanup: CLEANUP=all removes source.mp4, the best picture source
+    copy = sync_copy.export(job)  # it never removes dubbed.mp4 anyway
     if copy:
         print(f"\nCopied to {copy} (EXPORT_DIR)")
     level = args.cleanup or cleanup.read_level(os.getenv("CLEANUP"))

@@ -22,6 +22,7 @@ load_dotenv(SCRIPT_DIR / ".env")
 
 JOBS_DIR = SCRIPT_DIR / "dub_jobs_output"
 RESULT = Path("dub_output") / "dubbed.mp4"
+THUMBNAIL = Path("dub_output") / "thumbnail.jpg"
 
 
 def export_dir():
@@ -44,6 +45,12 @@ def copy_path(video_id, folder=None):
     return folder / f"{video_id}.mp4" if folder is not None else None
 
 
+def thumbnail_copy_path(video_id, folder=None):
+    """Where the thumbnail of `video_id` is copied (next to the video, .jpg); None without EXPORT_DIR."""
+    path = copy_path(video_id, folder)
+    return path.with_suffix(".jpg") if path is not None else None
+
+
 def existing_copy(video_id, folder=None):
     """The copy of `video_id` as a string when it exists, else ''."""
     path = copy_path(video_id, folder)
@@ -58,6 +65,19 @@ def export(job, folder=None):
     # Written under another name first, so a syncing app never uploads half a video.
     temporary = target.with_name(target.name + ".part")
     shutil.copyfile(Path(job) / RESULT, temporary)
+    replace_file(temporary, target)
+    export_thumbnail(job, folder)
+    return target
+
+
+def export_thumbnail(job, folder=None):
+    """Copy dub_output/thumbnail.jpg next to the exported video when there is one; the copy, or None."""
+    source = Path(job) / THUMBNAIL
+    target = thumbnail_copy_path(Path(job).name, folder)
+    if target is None or not source.is_file():
+        return None
+    temporary = target.with_name(target.name + ".part")
+    shutil.copyfile(source, temporary)
     replace_file(temporary, target)
     return target
 
@@ -80,6 +100,11 @@ def run_local_checks():
         assert not list(out.glob("*.part")) and existing_copy("abc", out) == str(copy)
         (job / RESULT).write_bytes(b"newer")  # a redone video replaces the old copy
         assert export(job, out).read_bytes() == b"newer"
+        assert not (out / "abc.jpg").exists()  # no thumbnail made: nothing to copy
+        (job / THUMBNAIL).write_bytes(b"jpg")
+        export(job, out)
+        assert (out / "abc.jpg").read_bytes() == b"jpg" and thumbnail_copy_path("abc", out) == out / "abc.jpg"
+        assert not list(out.glob("*.part"))
 
 
 def main():
