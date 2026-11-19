@@ -242,8 +242,23 @@ async function refresh() {
         if (!res.ok) alert((await res.json()).error || "Không xóa được");
         refresh();
       };
-      const buttons = el("div", "opts"); buttons.append(open, redo, del);
+      const thumb = el("button", "ghost", v.thumbnail ? "Làm lại thumbnail" : "Tạo thumbnail");
+      thumb.title = "Ảnh dọc 9:16 lấy từ chính video (khung hình nét nhất, nền mờ)";
+      thumb.onclick = async () => {
+        thumb.disabled = true; thumb.textContent = "Đang làm...";
+        const res = await fetch(`/api/videos/${encodeURIComponent(v.video_id)}/thumbnail`, {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+        if (!res.ok) alert((await res.json()).error || "Không làm được thumbnail");
+        lastVideos = ""; refresh();
+      };
+      const buttons = el("div", "opts"); buttons.append(open, redo, thumb, del);
       row.append(buttons); card.append(row);
+      if (v.thumbnail) {
+        const pic = el("a"); pic.href = `/thumbnail/${encodeURIComponent(v.video_id)}?download=1`; pic.title = "Tải thumbnail";
+        const img = document.createElement("img");
+        img.src = `/thumbnail/${encodeURIComponent(v.video_id)}?t=${v.thumbnail}`; img.alt = "thumbnail";
+        img.style.cssText = "height:160px; border-radius:6px; margin-top:10px; border:1px solid var(--line)";
+        pic.append(img); card.append(pic);
+      }
       if (v.exported) card.append(el("div", "note", `Đã chép sang thư mục đồng bộ: ${v.exported}`));
       list.append(card);
     });
