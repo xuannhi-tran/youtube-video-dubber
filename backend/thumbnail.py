@@ -7,8 +7,7 @@
     python thumbnail.py VIDEO_ID --no-title      # the picture only
 
 The look follows the usual TikTok cover: the frame darkened (darker towards the bottom), a big white
-UPPER-CASE title in the middle, a small upper-case topic line under it and a gold hook sentence lower down,
-all inside TikTok's safe area. An LLM writes the three texts from the video's title, its brief and the start
+UPPER-CASE title in the middle and a small upper-case topic line under it, all inside TikTok's safe area. An LLM writes the three texts from the video's title, its brief and the start
 of the Vietnamese translation; they are kept in dub_output/thumbnail_text.json and reused.
 THUMBNAIL_TITLE=0 leaves the text off; when the LLM fails the picture is made without text.
 
@@ -57,13 +56,11 @@ CJK = re.compile(r"[\u3400-\u9fff]")
 SAMPLE_CHARS = 1500            # how much of the translation the text writer reads
 SIDE_MARGIN = 60               # px left and right of the texts
 CENTER_Y = 980                 # middle of the title + topic block: the middle of the picture, as on the TikTok covers
-SAFE_BOTTOM = 1560             # the bottom 380 px belong to TikTok's caption: the hook ends above this
-HOOK_GAP = 330                 # px between the topic line and the hook (less when the hook would pass SAFE_BOTTOM)
 FONTS_DIR = SCRIPT_DIR / "fonts"   # Be Vietnam Pro and Lora (SIL Open Font License, with the Vietnamese diacritics)
-TITLE_SIZES, TOPIC_SIZES, HOOK_SIZES = (112, 104, 96, 88, 80, 72, 64), (42, 38), (72, 66, 60, 54, 48, 44)
-TITLE_LINES, TOPIC_LINES, HOOK_LINES = 3, 2, 3
-TITLE_TWO_LINES_FROM, HOOK_TWO_LINES_FROM = 80, 54   # a text is kept to 2 lines unless that needs a smaller font
-GOLD, SOFT_WHITE = "&H004AA0E8", "&H00D8D8D8"   # ASS colours are BBGGRR: orange-gold E8A04A and light grey
+TITLE_SIZES, TOPIC_SIZES = (112, 104, 96, 88, 80, 72, 64), (42, 38)
+TITLE_LINES, TOPIC_LINES = 3, 2
+TITLE_TWO_LINES_FROM = 80       # the title is kept to 2 lines unless that needs a smaller font
+SOFT_WHITE = "&H00D8D8D8"       # ASS colours are BBGGRR: light grey
 DIM = "eq=brightness=-0.10:saturation=0.90"      # the picture is darkened so white text reads on any frame
 SHADE = "clip(8+125*pow(Y/H,3),0,135)"          # extra darkness (alpha), strongest at the bottom
 
@@ -310,10 +307,10 @@ def fit_lines(text, sizes, width_factor, max_lines, two_lines_from=None):
 
 def text_ass(texts):
     """An ASS file with the cover texts in the layout of the TikTok covers: a big white upper-case title and a
-    small upper-case topic line, the two together in the middle of the picture, and a gold hook sentence lower down."""
+    small upper-case topic line, the two together in the middle of the picture. The hook the LLM also writes is
+    kept in thumbnail_text.json but not drawn (the owner preferred the cover without it)."""
     sans = font("THUMBNAIL_FONT", "Be Vietnam Pro")    # fonts with all the Vietnamese diacritics (bundled in fonts/)
     sans_medium = font("THUMBNAIL_TOPIC_FONT", "Be Vietnam Pro Medium")
-    serif = font("THUMBNAIL_HOOK_FONT", "Lora")
     events, styles = [], []
 
     def put(name, y, size, bold, colour, face, outline, spacing, lines):
@@ -337,11 +334,6 @@ def text_ass(texts):
         top += title[2] + gap
     if topic:
         put("Topic", top, topic[1], False, SOFT_WHITE, sans_medium, 1, 5, topic[0])
-        top += topic[2]
-    if texts.get("hook"):
-        lines, size = fit_lines(texts["hook"], HOOK_SIZES, 0.40, HOOK_LINES, HOOK_TWO_LINES_FROM)
-        height = len(lines) * size * 1.4
-        put("Hook", min(top + HOOK_GAP, SAFE_BOTTOM - height), size, False, GOLD, serif, 1, 0, lines)
     return (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {WIDTH}\nPlayResY: {HEIGHT}\n\n"
@@ -451,18 +443,19 @@ def run_local_checks():
     texts = {"title": "Bạn có đang tự dằn nhân rối loạn?", "topic": "Tâm lý khoa học khác thường",
              "hook": "Hôm nay tôi sẽ chỉ cho bạn một cách để thoát khỏi vòng lặp của sự lo âu."}
     script = text_ass(texts)
-    assert f"PlayResY: {HEIGHT}" in script and script.count("Dialogue:") == 3
+    assert f"PlayResY: {HEIGHT}" in script and script.count("Dialogue:") == 2   # the hook is not drawn
     assert "BẠN CÓ ĐANG" in script and "TÂM LÝ KHOA HỌC" in script and "\\N" in script
-    assert "&H00FFFFFF" in script and GOLD in script and f"\\pos({WIDTH // 2}," in script
+    assert "&H00FFFFFF" in script and "Hook" not in script and "vòng lặp" not in script   # the hook is not drawn
+    assert f"\\pos({WIDTH // 2}," in script
     assert text_ass({"title": "Chỉ có tiêu đề"}).count("Dialogue:") == 1
     long_lines, long_size = fit_lines("MỘT TIÊU ĐỀ RẤT RẤT DÀI " * 6, TITLE_SIZES, 0.47, TITLE_LINES, TITLE_TWO_LINES_FROM)
     assert len(long_lines) == TITLE_LINES and long_size == TITLE_SIZES[-1]    # never more lines than allowed
     assert fit_lines("NGẮN GỌN", TITLE_SIZES, 0.47, TITLE_LINES, TITLE_TWO_LINES_FROM) == (["NGẮN GỌN"], TITLE_SIZES[0])
     even, size = fit_lines("BẠN CÓ ĐANG TỰ DẰN NHÂN RỐI LOẠN?", TITLE_SIZES, 0.47, TITLE_LINES, TITLE_TWO_LINES_FROM)
     assert len(even) == 2 and size >= TITLE_TWO_LINES_FROM and min(map(len, even)) >= 12   # two even lines, not three
-    # the title and topic are centred on the picture, the hook stays above TikTok's caption area
+    # the title and topic are centred on the picture
     middle = [int(line.split("pos(540,")[1].split(")")[0]) for line in script.splitlines() if "pos(540," in line]
-    assert len(middle) == 3 and middle[0] < CENTER_Y < middle[1] + 60 and middle[2] > middle[1]
+    assert len(middle) == 2 and middle[0] < CENTER_Y < middle[1] + 60
     # the written texts: parsing, order of the LLMs, saved file
     good = '{"title": "Bạn thuộc kiểu nào?", "topic": "Tâm lý học.", "hook": "Câu hook dài vừa phải thôi nhé."}'
     assert parse_texts(good) == {"title": "Bạn thuộc kiểu nào?", "topic": "Tâm lý học",
