@@ -77,6 +77,7 @@ TEMPERATURE = 0.3
 MAX_ATTEMPTS = 6
 MAX_WAIT_SECONDS = 90  # a longer "try again in ..." is treated as an exhausted quota
 REQUEST_TIMEOUT = 120
+SLOW_MODEL_TIMEOUT = 360  # Gemma answers can take 5 minutes; the default would cut them off
 
 
 class QuotaExhausted(Exception):
@@ -85,6 +86,13 @@ class QuotaExhausted(Exception):
 
 class LLMError(RuntimeError):
     """The provider refused or failed the request for a reason retrying will not fix."""
+
+
+class RequestTooLarge(LLMError):
+    """One request is bigger than the model's per-minute limit, so waiting never helps.
+
+    A role with a fallback LLM moves to it, like on a daily quota.
+    """
 
 
 # ---------------------------------------------------------
@@ -132,6 +140,20 @@ def retry_seconds(headers, message):
 
 def backoff(attempt):
     return min(60.0, 2 ** attempt + random.uniform(0, 1))
+
+
+def request_timeout(model):
+    """Seconds to wait for one answer: LLM_REQUEST_TIMEOUT, else longer for the slow Gemma models."""
+    value = (os.getenv("LLM_REQUEST_TIMEOUT") or "").strip()
+    if value:
+        try:
+            seconds = float(value)
+        except ValueError:
+            seconds = 0
+        if seconds <= 0:
+            raise ValueError(f"LLM_REQUEST_TIMEOUT must be a positive number of seconds, got {value!r}")
+        return seconds
+    return SLOW_MODEL_TIMEOUT if "gemma" in (model or "").lower() else REQUEST_TIMEOUT
 
 
 def is_local(provider):
@@ -248,6 +270,50 @@ def max_tokens_setting():
     return int(value)
 
 
+# Some Groq accounts allow very little OUTPUT per minute (Qwen 3.8 27B: 1000 tokens, about one
+# translation window a minute). The limit is learned from the first 429 that names it, then each
+# request waits until the last minute's output plus its own estimate fits.
+_output_limit = {}  # model -> output tokens per minute
+_output_used = {}   # model -> [(time, tokens)] of the last minute
+_pace_lock = threading.Lock()
+OTPM_PATTERN = re.compile(r"output tokens per minute.*?Limit\s+(\d+)", re.IGNORECASE | re.DOTALL)
+
+
+def learn_output_limit(model, message):
+    """Remember the per-minute output limit a Groq error message names; the limit, or None."""
+    match = OTPM_PATTERN.search(message or "")
+    if not match:
+        return None
+    _output_limit[model] = int(match.group(1))
+    return _output_limit[model]
+
+
+def pace_wait(model, now=time.monotonic):
+    """Seconds to wait before a request to `model` so its last minute of output stays under the limit."""
+    limit = _output_limit.get(model)
+    if not limit:
+        return 0.0
+    with _pace_lock:
+        used = [(t, n) for t, n in _output_used.get(model, []) if now() - t < 60]
+        _output_used[model] = used
+        recent = [n for _, n in used]
+        estimate = min(limit * 0.9, max(recent) if recent else limit * 0.6)
+        total = sum(recent)
+        wait = 0.0
+        for t, n in used:  # the oldest entries leave the window first
+            if total + estimate <= limit:
+                break
+            wait = max(wait, t + 60 - now())
+            total -= n
+        return max(wait, 0.0)
+
+
+def record_output(model, tokens, now=time.monotonic):
+    if model in _output_limit and tokens:
+        with _pace_lock:
+            _output_used.setdefault(model, []).append((now(), tokens))
+
+
 def _groq(prompt, model, api_key, post, sleep, reasoning=None):
     headers = {"Authorization": f"Bearer {api_key}"}
     body = {
@@ -259,10 +325,19 @@ def _groq(prompt, model, api_key, post, sleep, reasoning=None):
         body["max_completion_tokens"] = max_tokens_setting()
     if reasoning:
         body["reasoning_effort"] = reasoning
+    shrunk = False
     for attempt in range(1, MAX_ATTEMPTS + 1):
         last = attempt == MAX_ATTEMPTS
+        delay = pace_wait(model)
+        if delay > 0:
+            print(f"Groq allows {_output_limit[model]} output tokens a minute for {model}; "
+                  f"waiting {delay:.0f}s before the next request...", flush=True)
+            sleep(delay)
+        if _output_limit.get(model):  # never ask for more than a minute allows
+            cap = int(_output_limit[model] * 0.9)
+            body["max_completion_tokens"] = min(body.get("max_completion_tokens") or cap, cap)
         try:
-            response = post(GROQ_URL, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
+            response = post(GROQ_URL, headers=headers, json=body, timeout=request_timeout(model))
         except httpx.TransportError as error:  # timeouts, dropped connections
             if last:
                 raise LLMError(f"Groq is unreachable: {error}") from error
@@ -273,12 +348,22 @@ def _groq(prompt, model, api_key, post, sleep, reasoning=None):
             continue
 
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"] or ""
+            data = response.json()
+            text = data["choices"][0]["message"]["content"] or ""
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            record_output(model, usage.get("completion_tokens") or len(text) // 3)
+            return text
 
         message = _error_message(response)
+        learn_output_limit(model, message)
         if response.status_code == 429 and "request too large" in message.lower():
+            if model in _output_limit and "output tokens" in message.lower() and not shrunk:
+                shrunk = True  # asked for more output than a minute allows: ask for less once
+                print(f"Groq: {model} allows {_output_limit[model]} output tokens a minute; "
+                      "asking for a shorter answer.", flush=True)
+                continue
             # Waiting never helps: the single request is bigger than the model's limit.
-            raise LLMError(f"{message} Set LLM_MAX_TOKENS in .env below the limit it names.")
+            raise RequestTooLarge(f"{message} Set LLM_MAX_TOKENS in .env below the limit it names.")
         if response.status_code == 429:
             wait = retry_seconds(response.headers, message)
             if is_daily_limit(message) or last or (wait is not None and wait > MAX_WAIT_SECONDS):
@@ -379,7 +464,7 @@ def _gemini(prompt, model, api_key, post, sleep, reasoning=None):
         last = attempt == MAX_ATTEMPTS
         throttle("gemini", rpm, sleep)
         try:
-            response = post(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
+            response = post(url, headers=headers, json=body, timeout=request_timeout(model))
         except httpx.TransportError as error:
             if last:
                 raise LLMError(f"Gemini is unreachable: {error}") from error
@@ -542,13 +627,13 @@ def generate(prompt, model=None, provider=None, role=None, post=httpx.post, slee
         return _generate_with(prompt, fallback, post, sleep, reasoning)
     try:
         return _generate_with(prompt, settings(provider, model, role), post, sleep, reasoning)
-    except QuotaExhausted as error:
+    except (QuotaExhausted, RequestTooLarge) as error:
         if not fallback:
             raise
         with _switch_lock:
             if role not in _switched:
                 _switched.add(role)
-                print(f"{describe(role=role)} is out of quota ({str(error)[:120]}). "
+                print(f"{describe(role=role)} cannot answer ({str(error)[:120]}). "
                       f"Switching to {fallback[0]}:{fallback[1]} for the rest of this run.", flush=True)
         return _generate_with(prompt, fallback, post, sleep, reasoning)
 
@@ -674,6 +759,51 @@ def _check_fallback(wait):
     assert active_name("translate") == "groq:qwen/qwen3.8-27b"
     os.environ.pop("TRANSLATE_FALLBACK_PROVIDER")
     os.environ.pop("TRANSLATE_LLM_PROVIDER"); os.environ.pop("TRANSLATE_LLM_MODEL")
+
+    # Groq limits OUTPUT per minute for Qwen 3.8 27B (1000): learn it, shorten, pace, fall back.
+    _output_limit.clear(); _output_used.clear()
+    big = _FakeResponse(429, error="Request too large for model `qwen/q` on output tokens per minute (OTPM): "
+                                   "Limit 1000, Requested 2048. Please reduce max_tokens")
+    os.environ["TRANSLATE_LLM_PROVIDER"], os.environ["TRANSLATE_LLM_MODEL"] = "groq", "qwen/q"
+    post = _scripted_post(big, _FakeResponse(200, "ngắn"))
+    assert generate("hi", role="translate", post=post, sleep=wait) == "ngắn"
+    assert _output_limit["qwen/q"] == 1000 and post.calls[1]["json"]["max_completion_tokens"] == 900
+    post = _scripted_post(big, big)  # still too large after shrinking: its own error, not a plain LLMError
+    try:
+        generate("hi", role="translate", post=post, sleep=wait)
+    except RequestTooLarge:
+        pass
+    else:
+        raise AssertionError("a request that stays too large must raise RequestTooLarge")
+    os.environ["TRANSLATE_FALLBACK_PROVIDER"] = "ollama"
+    post = _scripted_post(big, big, _FakeResponse(200, "từ dự phòng"))
+    assert generate("hi", role="translate", post=post, sleep=wait) == "từ dự phòng" and "translate" in _switched
+    _switched.clear()
+    os.environ.pop("TRANSLATE_FALLBACK_PROVIDER")
+    clock = [1000.0]
+    _output_used.clear()
+    assert pace_wait("qwen/q", now=lambda: clock[0]) == 0  # nothing used yet
+    record_output("qwen/q", 700, now=lambda: clock[0])
+    clock[0] += 20
+    waited = pace_wait("qwen/q", now=lambda: clock[0])
+    assert 39 <= waited <= 41  # 700 used + about 700 more would not fit: wait for the first to age out
+    clock[0] += 41
+    assert pace_wait("qwen/q", now=lambda: clock[0]) == 0
+    assert pace_wait("other/model", now=lambda: clock[0]) == 0  # models without a known limit are not paced
+    os.environ.pop("TRANSLATE_LLM_PROVIDER"); os.environ.pop("TRANSLATE_LLM_MODEL")
+    _output_limit.clear(); _output_used.clear()
+
+    assert request_timeout("gemma-4-31b-it") == SLOW_MODEL_TIMEOUT and request_timeout("x") == REQUEST_TIMEOUT
+    os.environ["LLM_REQUEST_TIMEOUT"] = "45"
+    assert request_timeout("gemma-4-31b-it") == 45
+    os.environ["LLM_REQUEST_TIMEOUT"] = "0"
+    try:
+        request_timeout("x")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("LLM_REQUEST_TIMEOUT=0 must be rejected")
+    os.environ.pop("LLM_REQUEST_TIMEOUT")
 
     headers = {"x-ratelimit-limit-requests": "1000", "x-ratelimit-limit-tokens": "8000",
                "x-ratelimit-remaining-tokens": "7990"}
@@ -906,7 +1036,7 @@ def run_local_checks():
 
     names = ("GROQ_API_KEY", "LLM_PROVIDER", "LLM_MODEL", "LLM_MAX_TOKENS",
              "TRANSLATE_LLM_PROVIDER", "TRANSLATE_LLM_MODEL", "FIT_LLM_PROVIDER", "FIT_LLM_MODEL",
-             "FIT_FALLBACK_PROVIDER", "FIT_FALLBACK_MODEL", "TRANSLATE_FALLBACK_PROVIDER", "TRANSLATE_FALLBACK_MODEL",
+             "FIT_FALLBACK_PROVIDER", "FIT_FALLBACK_MODEL", "TRANSLATE_FALLBACK_PROVIDER", "TRANSLATE_FALLBACK_MODEL", "LLM_REQUEST_TIMEOUT",
              "LOCAL_LLM_URL", "LOCAL_LLM_TIMEOUT", "LOCAL_LLM_THINK", "LOCAL_LLM_API_KEY",
              "GEMINI_API_KEY", "GEMINI_RPM")
     saved = {name: os.environ.get(name) for name in names}
@@ -948,13 +1078,15 @@ def run_local_checks():
 
         too_large = _FakeResponse(429, error="Request too large for model x on output tokens per minute "
                                   "(OTPM): Limit 1000, Requested 2048.")
-        post = _scripted_post(too_large)
+        post = _scripted_post(too_large, too_large)
         try:
             generate("hi", post=post, sleep=wait)
         except LLMError as error:
-            assert "LLM_MAX_TOKENS" in str(error) and len(post.calls) == 1  # not retried
+            # asked once more with a shorter answer, then given up (not retried like a rate limit)
+            assert "LLM_MAX_TOKENS" in str(error) and len(post.calls) == 2
         else:
-            raise AssertionError("an oversized request must not be retried")
+            raise AssertionError("an oversized request must raise")
+        _output_limit.clear()
 
         os.environ["LLM_MAX_TOKENS"] = "900"
         post = _scripted_post(_FakeResponse(200, "ok"))

@@ -980,8 +980,16 @@ def prepare_brief(info, segments, current):
     if not video_brief.enabled():
         return {}, segments
     print("\nReading the whole transcript for the video brief (topic, speaker, names, misheard words)...")
+    provider = (os.getenv("BRIEF_LLM_PROVIDER") or "").strip().lower() or None
+    model = (os.getenv("BRIEF_LLM_MODEL") or "").strip() or None
+    if provider:  # a model that answers a long JSON in one go (the translation model may allow little output)
+        current = f"{provider}:{model or llm.DEFAULT_MODELS.get(provider, '')}"
     try:
-        brief = video_brief.make_brief(info, segments, lambda text: llm.generate(text, role="translate"), current)
+        brief = video_brief.make_brief(
+            info, segments,
+            (lambda text: llm.generate(text, provider=provider, model=model)) if provider
+            else (lambda text: llm.generate(text, role="translate")),
+            current)
     except (llm.QuotaExhausted, llm.LLMError, RuntimeError) as error:
         print(f"No video brief ({str(error)[:150]}); translating without it.")
         return {}, segments
