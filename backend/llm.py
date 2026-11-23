@@ -357,7 +357,7 @@ def gemini_error_info(response):
     return message, daily, wait
 
 
-def _gemini(prompt, model, api_key, post, sleep, reasoning=None):
+def _gemini(prompt, model, api_key, post, sleep, reasoning=None, max_tokens=None):
     """Google AI Studio through its OpenAI-compatible endpoint.
 
     A per-minute limit (RPM, TPM) is waited out; a per-day limit stops the run
@@ -370,8 +370,8 @@ def _gemini(prompt, model, api_key, post, sleep, reasoning=None):
         "temperature": TEMPERATURE,
         "messages": [{"role": "user", "content": prompt}],
     }
-    if max_tokens_setting():
-        body["max_tokens"] = max_tokens_setting()
+    if max_tokens or max_tokens_setting():
+        body["max_tokens"] = max_tokens or max_tokens_setting()
     if reasoning:
         body["reasoning_effort"] = reasoning
     rpm = gemini_rpm()
@@ -527,10 +527,11 @@ _switched = set()  # roles that moved to their fallback LLM in this process
 _switch_lock = threading.Lock()
 
 
-def generate(prompt, model=None, provider=None, role=None, post=httpx.post, sleep=time.sleep):
+def generate(prompt, model=None, provider=None, role=None, post=httpx.post, sleep=time.sleep, max_tokens=None):
     """Send one prompt and return the answer text (reasoning blocks removed).
 
     `role` ("translate", "fit" or "review") picks that job's settings, see settings().
+    `max_tokens` overrides LLM_MAX_TOKENS for this one request (Gemini only; a whole-video answer is long).
     {ROLE}_LLM_REASONING (e.g. REVIEW_LLM_REASONING=low) is sent to Groq and Gemini as reasoning_effort.
     When the role's main LLM is out of quota and it has a fallback (TRANSLATE_FALLBACK_*, FIT_FALLBACK_*),
     this and every later call of the process use the fallback.
@@ -539,9 +540,9 @@ def generate(prompt, model=None, provider=None, role=None, post=httpx.post, slee
     fallback = None if explicit else fallback_settings(role)
     reasoning = None if explicit else reasoning_setting(role)
     if fallback and role in _switched:
-        return _generate_with(prompt, fallback, post, sleep, reasoning)
+        return _generate_with(prompt, fallback, post, sleep, reasoning, max_tokens)
     try:
-        return _generate_with(prompt, settings(provider, model, role), post, sleep, reasoning)
+        return _generate_with(prompt, settings(provider, model, role), post, sleep, reasoning, max_tokens)
     except QuotaExhausted as error:
         if not fallback:
             raise
@@ -550,7 +551,7 @@ def generate(prompt, model=None, provider=None, role=None, post=httpx.post, slee
                 _switched.add(role)
                 print(f"{describe(role=role)} is out of quota ({str(error)[:120]}). "
                       f"Switching to {fallback[0]}:{fallback[1]} for the rest of this run.", flush=True)
-        return _generate_with(prompt, fallback, post, sleep, reasoning)
+        return _generate_with(prompt, fallback, post, sleep, reasoning, max_tokens)
 
 
 def active_name(role):
@@ -559,14 +560,14 @@ def active_name(role):
     return f"{fallback[0]}:{fallback[1]}" if fallback else describe(role=role)
 
 
-def _generate_with(prompt, chosen, post, sleep, reasoning=None):
+def _generate_with(prompt, chosen, post, sleep, reasoning=None, max_tokens=None):
     chosen_provider, chosen_model, api_key = chosen
     if chosen_provider == "groq":
         text = _groq(prompt, chosen_model, api_key, post, sleep, reasoning)
     elif is_local(chosen_provider):
         text = _local(prompt, chosen_provider, chosen_model, api_key, post, sleep)
     else:
-        text = _gemini(prompt, chosen_model, api_key, post, sleep, reasoning)
+        text = _gemini(prompt, chosen_model, api_key, post, sleep, reasoning, max_tokens)
     return strip_thinking(text)
 
 
@@ -855,6 +856,9 @@ def _check_gemini():
     post = _scripted_post(_GeminiResponse(200))
     generate("hi", provider="gemini", post=post, sleep=sleeps.append)
     assert post.calls[0]["json"]["max_tokens"] == 700
+    post = _scripted_post(_GeminiResponse(200))
+    generate("hi", provider="gemini", post=post, sleep=sleeps.append, max_tokens=32000)
+    assert post.calls[0]["json"]["max_tokens"] == 32000  # a per-request cap beats LLM_MAX_TOKENS
     os.environ.pop("LLM_MAX_TOKENS")
 
     # Spacing: at 10 requests a minute, a second request waits for the rest of 6 seconds.

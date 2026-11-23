@@ -320,6 +320,52 @@ def context_lines(context):
     return "\n".join(f"{source} => {translation}" for source, translation in context)
 
 
+TRANSLATION_RULES = """- First understand the whole passage, then translate it as fluent, natural
+  spoken Vietnamese (not word-for-word, not subtitle style).
+- Write for a listener who hears each sentence once and cannot read it again: say
+  the idea the way a Vietnamese speaker would explain it, so it is understood at once.
+  When the speaker counts off cases or types ("第一种…", "第二种…", "一是…二是…"),
+  say what the case IS in plain words ("Kiểu thứ hai là những người hay lo lắng, và
+  cách này giúp họ bớt lo"), never a literal frame such as "Dạng thứ hai giải quyết
+  nỗi lo của bạn" that leaves the listener guessing what is meant.
+- Read each complete Vietnamese sentence back as a native speaker would say it.
+  Remove duplicated meaning, repeated synonyms and stiff Chinese-derived phrasing;
+  for example, say "sâu thẳm trong lòng" once instead of combining it with
+  "trong tiềm thức" for the same idea.
+- Then split your Vietnamese back over the same segments, in order: each
+  segment holds the Vietnamese for its part. Inside a sentence you may move a
+  word or two across a segment boundary so the Vietnamese word order is natural.
+- Put . ? ! only where a sentence really ends, and ALWAYS put one there: a
+  passage of this length contains several sentences, so several segments must
+  end with . ? or !. A segment that continues a sentence ends with no
+  punctuation or a comma, and the next segment starts in lowercase.
+- Keep the speaker's meaning. The Chinese comes from speech recognition and may
+  contain recognition errors: correct them only when the context clearly shows
+  what was meant (a glossary term often is).
+- Do not invent facts when the transcript is uncertain.
+- Preserve the speaker's key information and use natural connecting words.
+  Do not make the Vietnamese abrupt just to shorten it; a later speech-fitting
+  step handles duration limits separately and may shorten lines if needed.
+- Never translate word for word. Spoken Chinese has structures that sound foreign in
+  Vietnamese: "我们" in front of a name (我们天才尼采) is only familiar speech, so write
+  "thiên tài Nietzsche", never "của chúng ta"; avoid chains of "của" ("thiên tài của
+  Nietzsche" becomes "thiên tài Nietzsche" or "Nietzsche, một thiên tài"); leave out
+  pronouns and fillers Vietnamese does not need.
+- Call a historical figure, a thinker or an older person "ông" or "bà" (or by name);
+  "anh ấy" and "cô ấy" are for young people only.
+- Choose the pronoun for 他/她 from WHO it is, never by habit: a child, a baby or a
+  son or daughter (also a child someone may have in the future) is "con", "đứa con",
+  "đứa trẻ" or "bé", never "ông ấy", "bà ấy" or "anh ấy"; "ông"/"bà" are only for a
+  real older person or a historical figure.
+- Forms of address: the speaker talks to the audience as "bạn" or "chúng ta".
+  Never call a person, a group of people or a personality type "nó"; use their
+  name, "người này", "những người này" or "họ". Refer to the same person the
+  same way throughout.
+- Write only what a voice-over can read: no parentheses, no quotation marks,
+  no brackets, no symbols.
+"""
+
+
 def build_translation_prompt(chunk, context=(), brief=None, following=()):
     """`brief` = {"about": 'About this video' text, "timing": duration rule} (both optional).
     `following` = the Chinese of the next few segments, so a sentence that runs on is understood."""
@@ -366,50 +412,7 @@ recognition cut it into short pieces, so a sentence often runs over several
 segments.
 
 How to translate:
-- First understand the whole passage, then translate it as fluent, natural
-  spoken Vietnamese (not word-for-word, not subtitle style).
-- Write for a listener who hears each sentence once and cannot read it again: say
-  the idea the way a Vietnamese speaker would explain it, so it is understood at once.
-  When the speaker counts off cases or types ("第一种…", "第二种…", "一是…二是…"),
-  say what the case IS in plain words ("Kiểu thứ hai là những người hay lo lắng, và
-  cách này giúp họ bớt lo"), never a literal frame such as "Dạng thứ hai giải quyết
-  nỗi lo của bạn" that leaves the listener guessing what is meant.
-- Read each complete Vietnamese sentence back as a native speaker would say it.
-  Remove duplicated meaning, repeated synonyms and stiff Chinese-derived phrasing;
-  for example, say "sâu thẳm trong lòng" once instead of combining it with
-  "trong tiềm thức" for the same idea.
-- Then split your Vietnamese back over the same segments, in order: each
-  segment holds the Vietnamese for its part. Inside a sentence you may move a
-  word or two across a segment boundary so the Vietnamese word order is natural.
-- Put . ? ! only where a sentence really ends, and ALWAYS put one there: a
-  passage of this length contains several sentences, so several segments must
-  end with . ? or !. A segment that continues a sentence ends with no
-  punctuation or a comma, and the next segment starts in lowercase.
-- Keep the speaker's meaning. The Chinese comes from speech recognition and may
-  contain recognition errors: correct them only when the context clearly shows
-  what was meant (a glossary term often is).
-- Do not invent facts when the transcript is uncertain.
-- Preserve the speaker's key information and use natural connecting words.
-  Do not make the Vietnamese abrupt just to shorten it; a later speech-fitting
-  step handles duration limits separately and may shorten lines if needed.
-- Never translate word for word. Spoken Chinese has structures that sound foreign in
-  Vietnamese: "我们" in front of a name (我们天才尼采) is only familiar speech, so write
-  "thiên tài Nietzsche", never "của chúng ta"; avoid chains of "của" ("thiên tài của
-  Nietzsche" becomes "thiên tài Nietzsche" or "Nietzsche, một thiên tài"); leave out
-  pronouns and fillers Vietnamese does not need.
-- Call a historical figure, a thinker or an older person "ông" or "bà" (or by name);
-  "anh ấy" and "cô ấy" are for young people only.
-- Choose the pronoun for 他/她 from WHO it is, never by habit: a child, a baby or a
-  son or daughter (also a child someone may have in the future) is "con", "đứa con",
-  "đứa trẻ" or "bé", never "ông ấy", "bà ấy" or "anh ấy"; "ông"/"bà" are only for a
-  real older person or a historical figure.
-- Forms of address: the speaker talks to the audience as "bạn" or "chúng ta".
-  Never call a person, a group of people or a personality type "nó"; use their
-  name, "người này", "những người này" or "họ". Refer to the same person the
-  same way throughout.
-- Write only what a voice-over can read: no parentheses, no quotation marks,
-  no brackets, no symbols.
-{brief.get("timing", "")}{glossary_rule}- Preserve every start and end timestamp exactly.
+{TRANSLATION_RULES}{brief.get("timing", "")}{glossary_rule}- Preserve every start and end timestamp exactly.
 - Return exactly the same number of segments as the input, in the same order.
 - Return ONLY valid JSON.
 
@@ -766,6 +769,163 @@ def load_cache():
     return cache if isinstance(cache, dict) else {}
 
 
+# ---------------------------------------------------------
+# WHOLE-VIDEO TRANSLATION (optional, one request per video)
+# ---------------------------------------------------------
+# A model with a tiny daily request quota but a huge token budget (Gemini 3.8 Flash: 20 requests a
+# day) translates the whole transcript in ONE request, as JSON keyed by segment number. Every number
+# must come back; missing ones are asked again (only those). Chunks it could not deliver in a usable
+# form, or all of them when the model is out of quota, go through the normal chunked path.
+
+WHOLE_MAX_TOKENS = 32000  # answer length allowed for one whole-video request
+WHOLE_BATCH_SEGMENTS = 400  # a longer transcript is sent in several consecutive requests
+WHOLE_RETRY_ROUNDS = 2  # extra requests per batch for numbers that did not come back
+
+
+def whole_settings():
+    """(provider, model) of TRANSLATE_WHOLE_MODEL when TRANSLATE_WHOLE=1, else None."""
+    if (os.getenv("TRANSLATE_WHOLE") or "0").strip().lower() not in ("1", "yes", "true", "on"):
+        return None
+    provider = (os.getenv("TRANSLATE_WHOLE_PROVIDER") or "gemini").strip().lower()
+    model = (os.getenv("TRANSLATE_WHOLE_MODEL") or "").strip()
+    if not model:
+        raise ValueError("TRANSLATE_WHOLE=1 needs TRANSLATE_WHOLE_MODEL (see: python llm.py --list gemini)")
+    llm.settings(provider, model)  # a missing key stops here
+    return provider, model
+
+
+def whole_batch_size():
+    value = (os.getenv("TRANSLATE_WHOLE_BATCH") or "").strip()
+    if not value:
+        return WHOLE_BATCH_SEGMENTS
+    if not value.isdigit() or int(value) < 1:
+        raise ValueError(f"TRANSLATE_WHOLE_BATCH must be a whole number of segments, got {value!r}")
+    return int(value)
+
+
+def build_whole_prompt(items, wanted, about="", context=()):
+    """`items` = [(number, text)] of one batch; `wanted` = the numbers to translate now (the rest is context)."""
+    source = "\n".join(f"{number}: {text}" for number, text in items)
+    glossary_lines = prompt_lines(GLOSSARY, " ".join(text for _, text in items))
+    glossary_rule = (
+        "- Glossary: use these terms exactly as written, but only where the speaker really says "
+        "that word or name. Write every other Chinese personal name in its Sino-Vietnamese (Hán Việt) "
+        f"reading; foreign names keep their original spelling:\n{glossary_lines}\n"
+        if glossary_lines else
+        "- Write Chinese personal names in their Sino-Vietnamese (Hán Việt) reading; foreign names "
+        "keep their original spelling.\n"
+    )
+    previous = (
+        "The part of the video before this transcript, already translated (continuity only, do NOT "
+        f"translate it again):\n{context_lines(context)}\n\n" if context else ""
+    )
+    only = ""
+    if len(wanted) != len(items):
+        only = (f"- Translate ONLY the segments numbered {', '.join(map(str, wanted))}; the other "
+                "segments are there for context and already done.\n")
+    return f"""
+You are the translation component of a video dubbing system. The Vietnamese
+text is read aloud by a voice-over, so it must sound like natural speech.
+
+Below is the transcript of one video, cut by speech recognition into numbered
+segments. A sentence often runs over several segments. Read the whole transcript
+first, then translate it.
+
+How to translate:
+{TRANSLATION_RULES}{glossary_rule}{only}- Answer with ONLY one JSON object: every segment number is a key and its
+  Vietnamese text is the value, for example {{"1": "...", "2": "..."}}. Include every
+  segment you were asked for, each exactly once, with the number it has below.
+
+{about}{previous}Chinese transcript (number: text):
+
+{source}
+"""
+
+
+def parse_whole_answer(text):
+    """{segment number: Vietnamese text} from a model answer; a cut-off answer still gives its complete entries."""
+    text = re.sub(r"```[a-zA-Z]*", "", llm.strip_thinking(text)).strip()
+    found = {}
+    first, last = text.find("{"), text.rfind("}")
+    try:
+        value = _loads_lenient(text[first:last + 1]) if first != -1 and last > first else None
+    except ValueError:
+        value = None
+    if isinstance(value, dict):
+        found = {str(key).strip(): item for key, item in value.items()}
+    else:
+        for match in re.finditer(r'"(\d+)"\s*:\s*("(?:[^"\\]|\\.)*")', text):
+            try:
+                found[match.group(1)] = json.loads(match.group(2))
+            except ValueError:
+                continue
+    return {key: item.strip() for key, item in found.items()
+            if isinstance(item, str) and item.strip() and key.isdigit()}
+
+
+def translate_whole(texts, generate, about="", batch_size=WHOLE_BATCH_SEGMENTS):
+    """(done, error): {number: Vietnamese} for the transcript `texts` (numbers start at 1), and the
+    exception that stopped it early (quota, server) or None. What was translated before an error is kept.
+
+    One request per batch, then up to WHOLE_RETRY_ROUNDS requests for the numbers still missing.
+    """
+    done = {}
+    try:
+        for begin in range(0, len(texts), batch_size):
+            numbers = range(begin + 1, min(begin + batch_size, len(texts)) + 1)
+            items = [(number, texts[number - 1]) for number in numbers]
+            context = [(texts[number - 1], done[number]) for number in range(begin - CONTEXT_SEGMENTS + 1, begin + 1)
+                       if number in done]
+            for attempt in range(1 + WHOLE_RETRY_ROUNDS):
+                wanted = [number for number in numbers if number not in done]
+                if not wanted:
+                    break
+                if attempt:
+                    print(f"{len(wanted)} segments missing from the answer; asking for them again "
+                          f"({attempt}/{WHOLE_RETRY_ROUNDS})", flush=True)
+                answer = parse_whole_answer(generate(build_whole_prompt(items, wanted, about, context)))
+                for number in wanted:
+                    text = answer.get(str(number))
+                    if text and not CJK.search(text):
+                        done[number] = text
+    except (llm.QuotaExhausted, llm.LLMError, RuntimeError) as error:
+        return done, error
+    return done, None
+
+
+def whole_chunks(chunks, done):
+    """{chunk index: [{"start","end","text"}]} for the chunks `done` translated completely and usably."""
+    result = {}
+    number = 0
+    for index, chunk in enumerate(chunks):
+        numbers = range(number + 1, number + len(chunk) + 1)
+        number += len(chunk)
+        if not all(item in done for item in numbers):
+            continue
+        translated = [{"start": source["start"], "end": source["end"], "text": done[item]}
+                      for source, item in zip(chunk, numbers)]
+        if is_usable(translated, len(chunk)):
+            result[index] = translated
+    return result
+
+
+def run_whole_translation(chunks, about, provider, model):
+    """The chunks' translations from the whole-video request(s); {} for chunks it could not deliver."""
+    flat = [source["source_text"] for chunk in chunks for source in chunk]
+    print(f"\nTranslating the whole video ({len(flat)} segments) in one request with {provider}:{model}...", flush=True)
+    done, error = translate_whole(
+        flat,
+        lambda prompt: llm.generate(prompt, provider=provider, model=model, max_tokens=WHOLE_MAX_TOKENS),
+        about, whole_batch_size(),
+    )
+    if error:
+        print(f"Whole-video translation stopped ({str(error)[:150]}); the chunks it did not "
+              "deliver are translated chunk by chunk.", flush=True)
+    result = whole_chunks(chunks, done)
+    print(f"Whole-video translation delivered {len(result)} of {len(chunks)} chunks.", flush=True)
+    return result
+
+
 def run_local_checks():
     glossary.run_local_checks()
     fenced = '<think>x</think>Here you go:\n```json\n[{"start": 0, "end": 1, "text": "Chào",},]\n```'
@@ -942,6 +1102,55 @@ def run_local_checks():
     quota.failed(quota=True)
     assert quota.off  # out of quota: no point asking again in this run
 
+    # Whole-video translation: one request, JSON keyed by number, only the missing numbers asked again.
+    assert parse_whole_answer('```json\n{"1": "a", "2": "b",}\n```') == {"1": "a", "2": "b"}
+    assert parse_whole_answer('{"1": "a", "2": "b", "3": "cut o') == {"1": "a", "2": "b"}  # cut off
+    assert parse_whole_answer('{"1": "", "x": "y", "2": 5, "3": " ok "}') == {"3": "ok"}
+    prompt = build_whole_prompt([(1, "句一"), (2, "句二")], [2], context=[("上", "trên")])
+    assert "1: 句一" in prompt and "ONLY the segments numbered 2" in prompt and "上 => trên" in prompt
+    assert "ONLY the segments numbered" not in build_whole_prompt([(1, "句一")], [1])
+    texts = [f"句{i}" for i in range(1, 8)]
+    prompts = []
+    def whole_model(prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:  # forgets 3 and leaves Chinese in 5
+            return json.dumps({"1": "một.", "2": "hai", "4": "bốn.", "5": "năm 句", "6": "sáu", "7": "bảy."}, ensure_ascii=False)
+        return json.dumps({"3": "ba", "5": "năm"})
+    done, error = translate_whole(texts, whole_model)
+    assert error is None and sorted(done) == [1, 2, 3, 4, 5, 6, 7] and len(prompts) == 2
+    assert "ONLY the segments numbered 3, 5" in prompts[1] and "ONLY the segments numbered" not in prompts[0]
+    # Segments that never come back are asked 1 + WHOLE_RETRY_ROUNDS times, then left to the chunked path.
+    prompts.clear()
+    done, error = translate_whole(texts, lambda prompt: prompts.append(prompt) or '{"1": "một"}')
+    assert error is None and done == {1: "một"} and len(prompts) == 1 + WHOLE_RETRY_ROUNDS
+    # A quota stop keeps what came before it; batches are consecutive and carry the previous lines.
+    prompts.clear()
+    def quota_after_first(prompt):
+        prompts.append(prompt)
+        if len(prompts) > 1:
+            raise llm.QuotaExhausted("daily limit")
+        return json.dumps({"1": "một", "2": "hai"})
+    done, error = translate_whole(texts, quota_after_first, batch_size=2)
+    assert done == {1: "một", 2: "hai"} and isinstance(error, llm.QuotaExhausted)
+    assert "句2 => hai" in prompts[1] and "3: 句3" in prompts[1] and "5: 句5" not in prompts[1]
+    two = [[{"start": 0.0, "end": 1.0, "source_text": "句1"}, {"start": 1.0, "end": 2.0, "source_text": "句2"}],
+           [{"start": 2.0, "end": 3.0, "source_text": "句3"}]]
+    assert whole_chunks(two, {1: "một.", 2: "hai.", 3: "ba."}).keys() == {0, 1}
+    assert whole_chunks(two, {1: "một.", 2: "hai."}).keys() == {0}  # a chunk missing a number is left out
+    saved_whole = {name: os.environ.pop(name, None) for name in ("TRANSLATE_WHOLE", "TRANSLATE_WHOLE_MODEL", "TRANSLATE_WHOLE_PROVIDER")}
+    assert whole_settings() is None
+    os.environ["TRANSLATE_WHOLE"] = "1"
+    try:
+        whole_settings()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("TRANSLATE_WHOLE=1 without a model must be rejected")
+    del os.environ["TRANSLATE_WHOLE"]
+    for name, value in saved_whole.items():
+        if value is not None:
+            os.environ[name] = value
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -1037,6 +1246,13 @@ def main():
         llm.settings(role="review")  # a missing key stops here, not after the first chunk
         pool = ThreadPoolExecutor(max_workers=review_workers())
         tracker = ReviewTracker(review_timeout())
+    whole = whole_settings()
+    whole_name = f"{whole[0]}:{whole[1]}" if whole else None
+    whole_done = {}
+    if whole and any(find_cached(cache, chunk, current, not args.retranslate, briefs[index])[0] is None
+                     for index, chunk in enumerate(chunks)):
+        all_text = " ".join(chunk_source_text(chunk) for chunk in chunks)
+        whole_done = run_whole_translation(chunks, video_brief.context_block(info, brief, all_text), *whole)
     print(f"\n[3/3] Translating with {current}" + (f", checking with {reviewer}..." if reviewer else "..."))
     reused = 0
     ready = {}      # chunk index -> its final translation (reviewed when a review model is set)
@@ -1125,6 +1341,12 @@ def main():
                     f"Chunk {index + 1}/{len(chunks)} "
                     f"({start:.2f}s -> {end:.2f}s): saved translation{by}"
                 )
+            elif index in whole_done:
+                translated, made_by = whole_done[index], whole_name
+                print(f"Chunk {index + 1}/{len(chunks)} ({start:.2f}s -> {end:.2f}s): from the whole-video request")
+                cache[chunk_key(chunk, made_by, briefs[index])] = translated
+                remember_model(cache, made_by)
+                write_json_atomic(CACHE_FILE, cache)
             else:
                 print(
                     f"Chunk {index + 1}/{len(chunks)} "
