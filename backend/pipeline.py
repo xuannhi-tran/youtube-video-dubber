@@ -794,6 +794,12 @@ def whole_settings():
     return provider, model
 
 
+def review_whole():
+    """REVIEW_WHOLE=1 also reviews chunks the whole-video model translated (off: a weaker reviewer
+    should not rewrite a stronger model's translation; the check after shortening still runs)."""
+    return (os.getenv("REVIEW_WHOLE") or "0").strip().lower() in ("1", "yes", "true", "on")
+
+
 def whole_batch_size():
     value = (os.getenv("TRANSLATE_WHOLE_BATCH") or "").strip()
     if not value:
@@ -1137,6 +1143,13 @@ def run_local_checks():
            [{"start": 2.0, "end": 3.0, "source_text": "句3"}]]
     assert whole_chunks(two, {1: "một.", 2: "hai.", 3: "ba."}).keys() == {0, 1}
     assert whole_chunks(two, {1: "một.", 2: "hai."}).keys() == {0}  # a chunk missing a number is left out
+    saved_review_whole = os.environ.pop("REVIEW_WHOLE", None)
+    assert not review_whole()
+    os.environ["REVIEW_WHOLE"] = "1"
+    assert review_whole()
+    del os.environ["REVIEW_WHOLE"]
+    if saved_review_whole is not None:
+        os.environ["REVIEW_WHOLE"] = saved_review_whole
     saved_whole = {name: os.environ.pop(name, None) for name in ("TRANSLATE_WHOLE", "TRANSLATE_WHOLE_MODEL", "TRANSLATE_WHOLE_PROVIDER")}
     assert whole_settings() is None
     os.environ["TRANSLATE_WHOLE"] = "1"
@@ -1366,7 +1379,7 @@ def main():
             # The next draft is translated with the previous drafts as context, so it never waits for a review.
             context = (context + [(source["source_text"], item["text"]) for source, item in zip(chunk, translated)])[-CONTEXT_SEGMENTS:]
 
-            if not reviewer:
+            if not reviewer or (made_by == whole_name and not review_whole()):
                 ready[index] = translated
             else:
                 key = review_key(chunk, translated, reviewer, briefs[index])
