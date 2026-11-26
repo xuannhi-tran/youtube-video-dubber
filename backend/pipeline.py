@@ -909,6 +909,15 @@ def whole_chunks(chunks, done):
     return result
 
 
+def needs_review(reviewer, made_by, whole_name):
+    """Whether a chunk's draft goes to the reviewer before shortening.
+
+    Not when the whole-video model made it: that model is stronger than the reviewer, and a weaker
+    model rewriting its lines tends to make them worse. Lines the fit step shortens are still
+    checked after shortening (speech.py, post-fit review)."""
+    return bool(reviewer) and not (whole_name and made_by == whole_name)
+
+
 def run_whole_translation(chunks, about, provider, model):
     """The chunks' translations from the whole-video request(s); {} for chunks it could not deliver."""
     flat = [source["source_text"] for chunk in chunks for source in chunk]
@@ -1133,6 +1142,9 @@ def run_local_checks():
     done, error = translate_whole(texts, quota_after_first, batch_size=2)
     assert done == {1: "một", 2: "hai"} and isinstance(error, llm.QuotaExhausted)
     assert "句2 => hai" in prompts[1] and "3: 句3" in prompts[1] and "5: 句5" not in prompts[1]
+    assert needs_review("gemini:r", "gemini:flash", "gemini:whole")
+    assert not needs_review("gemini:r", "gemini:whole", "gemini:whole")   # the whole-video model's lines
+    assert needs_review("gemini:r", "gemini:whole", None) and not needs_review(None, "x", None)
     two = [[{"start": 0.0, "end": 1.0, "source_text": "句1"}, {"start": 1.0, "end": 2.0, "source_text": "句2"}],
            [{"start": 2.0, "end": 3.0, "source_text": "句3"}]]
     assert whole_chunks(two, {1: "một.", 2: "hai.", 3: "ba."}).keys() == {0, 1}
@@ -1366,7 +1378,7 @@ def main():
             # The next draft is translated with the previous drafts as context, so it never waits for a review.
             context = (context + [(source["source_text"], item["text"]) for source, item in zip(chunk, translated)])[-CONTEXT_SEGMENTS:]
 
-            if not reviewer:
+            if not needs_review(reviewer, made_by, whole_name):
                 ready[index] = translated
             else:
                 key = review_key(chunk, translated, reviewer, briefs[index])

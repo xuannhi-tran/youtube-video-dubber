@@ -912,7 +912,10 @@ def run_local_checks():
              "TRANSLATE_LLM_PROVIDER", "TRANSLATE_LLM_MODEL", "FIT_LLM_PROVIDER", "FIT_LLM_MODEL",
              "FIT_FALLBACK_PROVIDER", "FIT_FALLBACK_MODEL", "TRANSLATE_FALLBACK_PROVIDER", "TRANSLATE_FALLBACK_MODEL",
              "LOCAL_LLM_URL", "LOCAL_LLM_TIMEOUT", "LOCAL_LLM_THINK", "LOCAL_LLM_API_KEY",
-             "GEMINI_API_KEY", "GEMINI_RPM")
+             "GEMINI_API_KEY", "GEMINI_RPM",
+             # .env may set a reviewer; the checks below expect the review role unset at first
+             "REVIEW_LLM_PROVIDER", "REVIEW_LLM_MODEL", "REVIEW_LLM_REASONING",
+             "TRANSLATE_LLM_REASONING", "FIT_LLM_REASONING")
     saved = {name: os.environ.get(name) for name in names}
     for name in names:
         os.environ.pop(name, None)

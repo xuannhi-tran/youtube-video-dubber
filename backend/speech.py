@@ -60,6 +60,7 @@ DEFAULT_WORDS_PER_SECOND = 4.5  # measured on the first test video
 MIN_SAMPLES = 3                 # measured clips needed before trusting them
 MAX_REFITS = 1                  # extra rewrites after a clip measured too long
 POST_FIT_REVIEW_VERSION = 2     # raise to retry saved fitted blocks with a new review prompt
+REVIEW_GIVE_UP_AFTER = 3        # post-fit review is switched off after this many failures in a row
 POLL_SECONDS = 1.0
 
 
@@ -159,6 +160,12 @@ def load_pronunciations(paths=PRONUNCIATION_FILES):
     return merged
 
 
+def review_gives_up(failures_in_row, quota=False):
+    """Post-fit review stops for the rest of the run on a quota stop, or after REVIEW_GIVE_UP_AFTER
+    failures in a row; one slow or failed answer only keeps that block's fitted text."""
+    return quota or failures_in_row >= REVIEW_GIVE_UP_AFTER
+
+
 def calibration_key():
     return f"{MODEL}|{VOICE}"
 
@@ -199,6 +206,10 @@ def run_local_checks():
     assert row["translated_text"] == "b c" and row["duration_ratio"] == 1.25
     assert row["classification"] == "TOO_LONG" and row["required_speed_factor"] == 1.25
     assert row["audio_file"] == "block_tts_output/block_001.wav"
+
+    # Post-fit review: one failure keeps that block's text, three in a row (or a quota stop) end it.
+    assert not review_gives_up(1) and not review_gives_up(2) and review_gives_up(3)
+    assert review_gives_up(1, quota=True)
 
 
 # ---------------------------------------------------------
@@ -247,6 +258,7 @@ class Speech:
         self.waiting_shown = False
         self.review_enabled = llm.role_configured("review")
         self.review_off = False
+        self.review_failures = 0  # post-fit review failures in a row
 
         AUDIO_DIR.mkdir(parents=True, exist_ok=True)
         metadata = read_json(METADATA_FILE, {})
@@ -458,7 +470,12 @@ class Speech:
                 raise
             if kind == "polish":
                 print(f"[{block_id:03d}] post-fit review failed ({error}); keeping fitted text", flush=True)
-                self.review_off = True
+                self.review_failures += 1
+                if not self.review_off and review_gives_up(self.review_failures,
+                                                           isinstance(error, llm.QuotaExhausted)):
+                    self.review_off = True
+                    print("Post-fit review switched off for the rest of this run "
+                          f"({self.review_failures} failures in a row or out of quota).", flush=True)
                 heapq.heappush(self.tts_queue, block_id)
                 self.save_state()
                 return
@@ -467,6 +484,7 @@ class Speech:
             self.llm_off = True
             text, status = None, "still_over_budget"
         if kind == "polish":
+            self.review_failures = 0
             self.counts["polishes"] += 1
             if text:
                 record["text"] = speakable(text, self.seen_asides)
