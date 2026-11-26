@@ -283,7 +283,7 @@ Each chunk is only about 20 seconds, so before translating, `pipeline.py` gives 
 
 To measure a change instead of guessing, `python eval_translation.py VIDEO_ID --make-reference --from 60 --to 180` copies some lines into `reference.json`; correct them by hand once, then `python eval_translation.py VIDEO_ID` scores the current translation against them (chrF, 0 to 100) and lists the lines furthest from your version. `--candidate a.json --candidate b.json` compares saved versions side by side.
 
-When the speech stage shortens a block to fit its time slot, the same review model checks that fitted text against the Chinese before it is read. It may fix awkward grammar, speaker perspective, or an unnatural literal metaphor, but its answer must stay within the block's word budget. The voice is then synthesized and measured again, so an edited line is not reused from the audio cache. This adds one review request for each block that was shortened; it runs only when `REVIEW_LLM_PROVIDER` is set.
+When the speech stage shortens a block to fit its time slot, the same review model checks that fitted text against the Chinese before it is read. It may fix awkward grammar, speaker perspective, or an unnatural literal metaphor, but its answer must stay within the block's word budget. The voice is then synthesized and measured again, so an edited line is not reused from the audio cache. This adds one review request for each block that was shortened; it runs only when `REVIEW_LLM_PROVIDER` is set. A failed or refused review keeps that block's fitted text; after 3 failures in a row (or when the reviewer is out of quota) the post-fit review is switched off for the rest of the run.
 
 
 ### Glossary
