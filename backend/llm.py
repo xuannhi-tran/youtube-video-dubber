@@ -357,7 +357,7 @@ def gemini_error_info(response):
     return message, daily, wait
 
 
-def _gemini(prompt, model, api_key, post, sleep, reasoning=None, max_tokens=None):
+def _gemini(prompt, model, api_key, post, sleep, reasoning=None, max_tokens=None, timeout=None, attempts=None):
     """Google AI Studio through its OpenAI-compatible endpoint.
 
     A per-minute limit (RPM, TPM) is waited out; a per-day limit stops the run
@@ -375,17 +375,18 @@ def _gemini(prompt, model, api_key, post, sleep, reasoning=None, max_tokens=None
     if reasoning:
         body["reasoning_effort"] = reasoning
     rpm = gemini_rpm()
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        last = attempt == MAX_ATTEMPTS
+    attempts = attempts or MAX_ATTEMPTS
+    for attempt in range(1, attempts + 1):
+        last = attempt == attempts
         throttle("gemini", rpm, sleep)
         try:
-            response = post(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
+            response = post(url, headers=headers, json=body, timeout=timeout or REQUEST_TIMEOUT)
         except httpx.TransportError as error:
             if last:
                 raise LLMError(f"Gemini is unreachable: {error}") from error
             delay = backoff(attempt)
             print(f"Gemini connection problem ({error.__class__.__name__}). "
-                  f"Retry {attempt + 1}/{MAX_ATTEMPTS} in {delay:.1f}s...", flush=True)
+                  f"Retry {attempt + 1}/{attempts} in {delay:.1f}s...", flush=True)
             sleep(delay)
             continue
 
@@ -405,12 +406,12 @@ def _gemini(prompt, model, api_key, post, sleep, reasoning=None, max_tokens=None
             if last or (wait is not None and wait > MAX_WAIT_SECONDS):
                 raise QuotaExhausted(f"Gemini rate limit for {model} did not clear: {message[:300]}")
             delay = (wait + 1.0) if wait is not None else max(backoff(attempt), 60.0 / rpm)
-            print(f"Gemini rate limit (429). Retry {attempt + 1}/{MAX_ATTEMPTS} "
+            print(f"Gemini rate limit (429). Retry {attempt + 1}/{attempts} "
                   f"in {delay:.1f}s... ({message[:150]})", flush=True)
             sleep(delay)
         elif response.status_code >= 500 and not last:
             delay = backoff(attempt)
-            print(f"Gemini busy ({response.status_code}). Retry {attempt + 1}/{MAX_ATTEMPTS} "
+            print(f"Gemini busy ({response.status_code}). Retry {attempt + 1}/{attempts} "
                   f"in {delay:.1f}s...", flush=True)
             sleep(delay)
         else:
@@ -527,11 +528,12 @@ _switched = set()  # roles that moved to their fallback LLM in this process
 _switch_lock = threading.Lock()
 
 
-def generate(prompt, model=None, provider=None, role=None, post=httpx.post, sleep=time.sleep, max_tokens=None):
+def generate(prompt, model=None, provider=None, role=None, post=httpx.post, sleep=time.sleep, max_tokens=None, timeout=None, attempts=None):
     """Send one prompt and return the answer text (reasoning blocks removed).
 
     `role` ("translate", "fit" or "review") picks that job's settings, see settings().
-    `max_tokens` overrides LLM_MAX_TOKENS for this one request (Gemini only; a whole-video answer is long).
+    `max_tokens` overrides LLM_MAX_TOKENS for this one request, `timeout` (seconds to wait for the answer)
+    and `attempts` (tries before giving up) override the defaults (Gemini only; a whole-video answer is long).
     {ROLE}_LLM_REASONING (e.g. REVIEW_LLM_REASONING=low) is sent to Groq and Gemini as reasoning_effort.
     When the role's main LLM is out of quota and it has a fallback (TRANSLATE_FALLBACK_*, FIT_FALLBACK_*),
     this and every later call of the process use the fallback.
@@ -540,9 +542,9 @@ def generate(prompt, model=None, provider=None, role=None, post=httpx.post, slee
     fallback = None if explicit else fallback_settings(role)
     reasoning = None if explicit else reasoning_setting(role)
     if fallback and role in _switched:
-        return _generate_with(prompt, fallback, post, sleep, reasoning, max_tokens)
+        return _generate_with(prompt, fallback, post, sleep, reasoning, max_tokens, timeout, attempts)
     try:
-        return _generate_with(prompt, settings(provider, model, role), post, sleep, reasoning, max_tokens)
+        return _generate_with(prompt, settings(provider, model, role), post, sleep, reasoning, max_tokens, timeout, attempts)
     except QuotaExhausted as error:
         if not fallback:
             raise
@@ -551,7 +553,7 @@ def generate(prompt, model=None, provider=None, role=None, post=httpx.post, slee
                 _switched.add(role)
                 print(f"{describe(role=role)} is out of quota ({str(error)[:120]}). "
                       f"Switching to {fallback[0]}:{fallback[1]} for the rest of this run.", flush=True)
-        return _generate_with(prompt, fallback, post, sleep, reasoning, max_tokens)
+        return _generate_with(prompt, fallback, post, sleep, reasoning, max_tokens, timeout, attempts)
 
 
 def active_name(role):
@@ -560,14 +562,14 @@ def active_name(role):
     return f"{fallback[0]}:{fallback[1]}" if fallback else describe(role=role)
 
 
-def _generate_with(prompt, chosen, post, sleep, reasoning=None, max_tokens=None):
+def _generate_with(prompt, chosen, post, sleep, reasoning=None, max_tokens=None, timeout=None, attempts=None):
     chosen_provider, chosen_model, api_key = chosen
     if chosen_provider == "groq":
         text = _groq(prompt, chosen_model, api_key, post, sleep, reasoning)
     elif is_local(chosen_provider):
         text = _local(prompt, chosen_provider, chosen_model, api_key, post, sleep)
     else:
-        text = _gemini(prompt, chosen_model, api_key, post, sleep, reasoning, max_tokens)
+        text = _gemini(prompt, chosen_model, api_key, post, sleep, reasoning, max_tokens, timeout, attempts)
     return strip_thinking(text)
 
 
@@ -859,6 +861,17 @@ def _check_gemini():
     post = _scripted_post(_GeminiResponse(200))
     generate("hi", provider="gemini", post=post, sleep=sleeps.append, max_tokens=32000)
     assert post.calls[0]["json"]["max_tokens"] == 32000  # a per-request cap beats LLM_MAX_TOKENS
+    assert post.calls[0]["timeout"] == REQUEST_TIMEOUT
+    post = _scripted_post(_GeminiResponse(200))
+    generate("hi", provider="gemini", post=post, sleep=sleeps.append, timeout=600)
+    assert post.calls[0]["timeout"] == 600
+    post = _scripted_post(_GeminiResponse(503), _GeminiResponse(503), _GeminiResponse(200))
+    try:
+        generate("hi", provider="gemini", post=post, sleep=sleeps.append, attempts=2)
+    except LLMError:
+        assert len(post.calls) == 2  # one retry, not MAX_ATTEMPTS
+    else:
+        raise AssertionError("a Gemini that stays busy must stop after `attempts` tries")
     os.environ.pop("LLM_MAX_TOKENS")
 
     # Spacing: at 10 requests a minute, a second request waits for the rest of 6 seconds.
@@ -912,7 +925,7 @@ def run_local_checks():
              "TRANSLATE_LLM_PROVIDER", "TRANSLATE_LLM_MODEL", "FIT_LLM_PROVIDER", "FIT_LLM_MODEL",
              "FIT_FALLBACK_PROVIDER", "FIT_FALLBACK_MODEL", "TRANSLATE_FALLBACK_PROVIDER", "TRANSLATE_FALLBACK_MODEL",
              "LOCAL_LLM_URL", "LOCAL_LLM_TIMEOUT", "LOCAL_LLM_THINK", "LOCAL_LLM_API_KEY",
-             "GEMINI_API_KEY", "GEMINI_RPM")
+             "GEMINI_API_KEY", "GEMINI_RPM", "REVIEW_LLM_PROVIDER", "REVIEW_LLM_MODEL", "REVIEW_LLM_REASONING")
     saved = {name: os.environ.get(name) for name in names}
     for name in names:
         os.environ.pop(name, None)
