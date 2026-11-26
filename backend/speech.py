@@ -59,6 +59,7 @@ PRONUNCIATION_FILES = [SCRIPT_DIR / "pronunciations.json", WORKDIR / "pronunciat
 DEFAULT_WORDS_PER_SECOND = 4.5  # measured on the first test video
 MIN_SAMPLES = 3                 # measured clips needed before trusting them
 MAX_REFITS = 1                  # extra rewrites after a clip measured too long
+POST_FIT_REVIEW_GIVE_UP_AFTER = 3  # failures in a row before the post-fit review is switched off
 POST_FIT_REVIEW_VERSION = 2     # raise to retry saved fitted blocks with a new review prompt
 POLL_SECONDS = 1.0
 
@@ -200,6 +201,31 @@ def run_local_checks():
     assert row["classification"] == "TOO_LONG" and row["required_speed_factor"] == 1.25
     assert row["audio_file"] == "block_tts_output/block_001.wav"
 
+    # The post-fit review gives up after POST_FIT_REVIEW_GIVE_UP_AFTER failures in a row (a quota stop at once).
+    class Done:
+        def __init__(self, error=None, result=("t", "polished")):
+            self.job, self.error, self.value = (1, "polish"), error, result
+        def result(self):
+            if self.error:
+                raise self.error
+            return self.value
+    run = Speech.__new__(Speech)
+    run.records = {1: new_record("a b")}
+    run.counts = {"polishes": 0}
+    run.tts_queue, run.seen_asides, run.review_failures, run.review_off = [], set(), 0, False
+    run.save_state = lambda: None
+    for _ in range(POST_FIT_REVIEW_GIVE_UP_AFTER - 1):
+        run.rewrite_done(Done(llm.LLMError("503")))
+    assert not run.review_off
+    run.rewrite_done(Done())  # a success starts the count again
+    assert run.review_failures == 0
+    for _ in range(POST_FIT_REVIEW_GIVE_UP_AFTER):
+        run.rewrite_done(Done(llm.LLMError("503")))
+    assert run.review_off
+    run.review_off = False
+    run.rewrite_done(Done(llm.QuotaExhausted("daily")))
+    assert run.review_off
+
 
 # ---------------------------------------------------------
 # Files
@@ -247,6 +273,7 @@ class Speech:
         self.waiting_shown = False
         self.review_enabled = llm.role_configured("review")
         self.review_off = False
+        self.review_failures = 0  # in a row; REVIEW_GIVE_UP_AFTER of them switch the post-fit review off
 
         AUDIO_DIR.mkdir(parents=True, exist_ok=True)
         metadata = read_json(METADATA_FILE, {})
@@ -458,7 +485,10 @@ class Speech:
                 raise
             if kind == "polish":
                 print(f"[{block_id:03d}] post-fit review failed ({error}); keeping fitted text", flush=True)
-                self.review_off = True
+                self.review_failures += 1
+                if isinstance(error, llm.QuotaExhausted) or self.review_failures >= POST_FIT_REVIEW_GIVE_UP_AFTER:
+                    self.review_off = True
+                    print("Post-fit review switched off for the rest of this run.", flush=True)
                 heapq.heappush(self.tts_queue, block_id)
                 self.save_state()
                 return
@@ -468,6 +498,7 @@ class Speech:
             text, status = None, "still_over_budget"
         if kind == "polish":
             self.counts["polishes"] += 1
+            self.review_failures = 0
             if text:
                 record["text"] = speakable(text, self.seen_asides)
             record["post_fit_review_version"] = POST_FIT_REVIEW_VERSION
