@@ -780,6 +780,8 @@ def load_cache():
 WHOLE_MAX_TOKENS = 32000  # answer length allowed for one whole-video request
 WHOLE_BATCH_SEGMENTS = 400  # a longer transcript is sent in several consecutive requests
 WHOLE_RETRY_ROUNDS = 2  # extra requests per batch for numbers that did not come back
+WHOLE_TIMEOUT = 600  # seconds one whole-video request may take (TRANSLATE_WHOLE_TIMEOUT); not resent after it
+WHOLE_ATTEMPTS = 3  # tries of one request when the server is busy (503); the chunked path takes over after
 
 
 def whole_settings():
@@ -791,6 +793,7 @@ def whole_settings():
     if not model:
         raise ValueError("TRANSLATE_WHOLE=1 needs TRANSLATE_WHOLE_MODEL (see: python llm.py --list gemini)")
     llm.settings(provider, model)  # a missing key stops here
+    whole_timeout()  # so does a bad TRANSLATE_WHOLE_TIMEOUT
     return provider, model
 
 
@@ -798,6 +801,16 @@ def review_whole():
     """REVIEW_WHOLE=1 also reviews chunks the whole-video model translated (off: a weaker reviewer
     should not rewrite a stronger model's translation; the check after shortening still runs)."""
     return (os.getenv("REVIEW_WHOLE") or "0").strip().lower() in ("1", "yes", "true", "on")
+
+
+def whole_timeout():
+    """TRANSLATE_WHOLE_TIMEOUT in seconds (default WHOLE_TIMEOUT)."""
+    value = (os.getenv("TRANSLATE_WHOLE_TIMEOUT") or "").strip()
+    if not value:
+        return WHOLE_TIMEOUT
+    if not value.isdigit() or int(value) < 1:
+        raise ValueError(f"TRANSLATE_WHOLE_TIMEOUT must be a whole number of seconds, got {value!r}")
+    return int(value)
 
 
 def whole_batch_size():
@@ -918,10 +931,12 @@ def whole_chunks(chunks, done):
 def run_whole_translation(chunks, about, provider, model):
     """The chunks' translations from the whole-video request(s); {} for chunks it could not deliver."""
     flat = [source["source_text"] for chunk in chunks for source in chunk]
-    print(f"\nTranslating the whole video ({len(flat)} segments) in one request with {provider}:{model}...", flush=True)
+    print(f"\nTranslating the whole video ({len(flat)} segments) in one request with {provider}:{model} "
+          f"(waiting up to {whole_timeout()}s)...", flush=True)
     done, error = translate_whole(
         flat,
-        lambda prompt: llm.generate(prompt, provider=provider, model=model, max_tokens=WHOLE_MAX_TOKENS),
+        lambda prompt: llm.generate(prompt, provider=provider, model=model, max_tokens=WHOLE_MAX_TOKENS,
+                                    timeout=whole_timeout(), attempts=WHOLE_ATTEMPTS),
         about, whole_batch_size(),
     )
     if error:
@@ -1150,7 +1165,19 @@ def run_local_checks():
     del os.environ["REVIEW_WHOLE"]
     if saved_review_whole is not None:
         os.environ["REVIEW_WHOLE"] = saved_review_whole
-    saved_whole = {name: os.environ.pop(name, None) for name in ("TRANSLATE_WHOLE", "TRANSLATE_WHOLE_MODEL", "TRANSLATE_WHOLE_PROVIDER")}
+    saved_whole = {name: os.environ.pop(name, None) for name in ("TRANSLATE_WHOLE", "TRANSLATE_WHOLE_MODEL",
+                                                                   "TRANSLATE_WHOLE_PROVIDER", "TRANSLATE_WHOLE_TIMEOUT")}
+    assert whole_timeout() == WHOLE_TIMEOUT
+    os.environ["TRANSLATE_WHOLE_TIMEOUT"] = "900"
+    assert whole_timeout() == 900
+    os.environ["TRANSLATE_WHOLE_TIMEOUT"] = "10m"
+    try:
+        whole_timeout()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("TRANSLATE_WHOLE_TIMEOUT=10m must be rejected")
+    del os.environ["TRANSLATE_WHOLE_TIMEOUT"]
     assert whole_settings() is None
     os.environ["TRANSLATE_WHOLE"] = "1"
     try:
