@@ -780,6 +780,8 @@ def load_cache():
 WHOLE_MAX_TOKENS = 32000  # answer length allowed for one whole-video request
 WHOLE_BATCH_SEGMENTS = 400  # a longer transcript is sent in several consecutive requests
 WHOLE_RETRY_ROUNDS = 2  # extra requests per batch for numbers that did not come back
+WHOLE_TIMEOUT = 600  # seconds to wait for one whole-video answer (a long answer takes minutes)
+WHOLE_ATTEMPTS = 2  # tries per request: an overloaded model (503) is asked once more, not five times
 
 
 def whole_settings():
@@ -921,7 +923,8 @@ def run_whole_translation(chunks, about, provider, model):
     print(f"\nTranslating the whole video ({len(flat)} segments) in one request with {provider}:{model}...", flush=True)
     done, error = translate_whole(
         flat,
-        lambda prompt: llm.generate(prompt, provider=provider, model=model, max_tokens=WHOLE_MAX_TOKENS),
+        lambda prompt: llm.generate(prompt, provider=provider, model=model, max_tokens=WHOLE_MAX_TOKENS,
+                                    timeout=WHOLE_TIMEOUT, attempts=WHOLE_ATTEMPTS),
         about, whole_batch_size(),
     )
     if error:
