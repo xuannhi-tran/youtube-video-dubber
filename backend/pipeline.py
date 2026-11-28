@@ -802,6 +802,12 @@ def review_whole():
     return (os.getenv("REVIEW_WHOLE") or "0").strip().lower() in ("1", "yes", "true", "on")
 
 
+def whole_reasoning():
+    """TRANSLATE_WHOLE_REASONING (e.g. low): how hard the whole-video model thinks; empty = its default.
+    A thinking model spends most of a long request on reasoning, so a low setting makes it much faster."""
+    return (os.getenv("TRANSLATE_WHOLE_REASONING") or "").strip().lower() or None
+
+
 def whole_batch_size():
     value = (os.getenv("TRANSLATE_WHOLE_BATCH") or "").strip()
     if not value:
@@ -921,17 +927,19 @@ def run_whole_translation(chunks, about, provider, model):
     """The chunks' translations from the whole-video request(s); {} for chunks it could not deliver."""
     flat = [source["source_text"] for chunk in chunks for source in chunk]
     print(f"\nTranslating the whole video ({len(flat)} segments) in one request with {provider}:{model}...", flush=True)
+    started = time.monotonic()
     done, error = translate_whole(
         flat,
         lambda prompt: llm.generate(prompt, provider=provider, model=model, max_tokens=WHOLE_MAX_TOKENS,
-                                    timeout=WHOLE_TIMEOUT, attempts=WHOLE_ATTEMPTS),
+                                    timeout=WHOLE_TIMEOUT, attempts=WHOLE_ATTEMPTS, reasoning=whole_reasoning()),
         about, whole_batch_size(),
     )
     if error:
         print(f"Whole-video translation stopped ({str(error)[:150]}); the chunks it did not "
               "deliver are translated chunk by chunk.", flush=True)
     result = whole_chunks(chunks, done)
-    print(f"Whole-video translation delivered {len(result)} of {len(chunks)} chunks.", flush=True)
+    print(f"Whole-video translation delivered {len(result)} of {len(chunks)} chunks "
+          f"in {time.monotonic() - started:.0f} s.", flush=True)
     return result
 
 
@@ -1146,6 +1154,13 @@ def run_local_checks():
            [{"start": 2.0, "end": 3.0, "source_text": "句3"}]]
     assert whole_chunks(two, {1: "một.", 2: "hai.", 3: "ba."}).keys() == {0, 1}
     assert whole_chunks(two, {1: "một.", 2: "hai."}).keys() == {0}  # a chunk missing a number is left out
+    saved_reasoning = os.environ.pop("TRANSLATE_WHOLE_REASONING", None)
+    assert whole_reasoning() is None
+    os.environ["TRANSLATE_WHOLE_REASONING"] = " Low "
+    assert whole_reasoning() == "low"
+    del os.environ["TRANSLATE_WHOLE_REASONING"]
+    if saved_reasoning is not None:
+        os.environ["TRANSLATE_WHOLE_REASONING"] = saved_reasoning
     saved_review_whole = os.environ.pop("REVIEW_WHOLE", None)
     assert not review_whole()
     os.environ["REVIEW_WHOLE"] = "1"
@@ -1271,6 +1286,7 @@ def main():
         whole_done = run_whole_translation(chunks, video_brief.context_block(info, brief, all_text), *whole)
     print(f"\n[3/3] Translating with {current}" + (f", checking with {reviewer}..." if reviewer else "..."))
     reused = 0
+    stage_started = time.monotonic()
     ready = {}      # chunk index -> its final translation (reviewed when a review model is set)
     pending = {}    # chunk index -> (future, draft, key, submitted at) of a review still running
     abandoned = []  # reviews given up while their request was still running
@@ -1411,6 +1427,8 @@ def main():
     if tracker and tracker.kept_drafts:
         print(f"\n{tracker.kept_drafts} chunks kept their draft because the review failed or was too slow "
               "(REVIEW_TIMEOUT); running the same command again reviews them.")
+    print(f"\nTranslation stage took {time.monotonic() - stage_started:.0f} s "
+          f"({len(whole_done)} chunks from the whole-video request).")
     print("\n--------------------------------")
     print("Pipeline complete.")
     print(f"Segments: {len(final_segments)}")

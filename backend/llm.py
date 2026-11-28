@@ -528,19 +528,21 @@ _switched = set()  # roles that moved to their fallback LLM in this process
 _switch_lock = threading.Lock()
 
 
-def generate(prompt, model=None, provider=None, role=None, post=httpx.post, sleep=time.sleep, max_tokens=None, timeout=None, attempts=None):
+def generate(prompt, model=None, provider=None, role=None, post=httpx.post, sleep=time.sleep, max_tokens=None, timeout=None, attempts=None,
+             reasoning=None):
     """Send one prompt and return the answer text (reasoning blocks removed).
 
     `role` ("translate", "fit" or "review") picks that job's settings, see settings().
     `max_tokens` overrides LLM_MAX_TOKENS for this one request, `timeout` (seconds to wait for the answer)
-    and `attempts` (tries before giving up) override the defaults (Gemini only; a whole-video answer is long).
+    and `attempts` (tries before giving up) override the defaults (Gemini only; a whole-video answer is long);
+    `reasoning` sets reasoning_effort for this request even when model/provider are given explicitly.
     {ROLE}_LLM_REASONING (e.g. REVIEW_LLM_REASONING=low) is sent to Groq and Gemini as reasoning_effort.
     When the role's main LLM is out of quota and it has a fallback (TRANSLATE_FALLBACK_*, FIT_FALLBACK_*),
     this and every later call of the process use the fallback.
     """
     explicit = provider is not None or model is not None
     fallback = None if explicit else fallback_settings(role)
-    reasoning = None if explicit else reasoning_setting(role)
+    reasoning = reasoning or (None if explicit else reasoning_setting(role))  # an argument wins
     if fallback and role in _switched:
         return _generate_with(prompt, fallback, post, sleep, reasoning, max_tokens, timeout, attempts)
     try:
@@ -865,6 +867,9 @@ def _check_gemini():
     post = _scripted_post(_GeminiResponse(200))
     generate("hi", provider="gemini", post=post, sleep=sleeps.append, timeout=600)
     assert post.calls[0]["timeout"] == 600
+    post = _scripted_post(_GeminiResponse(200))
+    generate("hi", provider="gemini", model="m", post=post, sleep=sleeps.append, reasoning="low")
+    assert post.calls[0]["json"]["reasoning_effort"] == "low"  # even with an explicit model
     post = _scripted_post(_GeminiResponse(503), _GeminiResponse(503), _GeminiResponse(200))
     try:
         generate("hi", provider="gemini", post=post, sleep=sleeps.append, attempts=2)
