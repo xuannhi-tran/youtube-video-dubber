@@ -144,19 +144,57 @@ def clean_text(value, max_words, capital=True):
     return text[0].upper() + text[1:] if capital else text
 
 
-def parse_texts(answer):
-    """{"title", "topic", "hook"} from the model's answer (a field it got wrong is ""), or {} without a usable title."""
-    text = re.sub(r"<(think|thought)>.*?</\1>", "", answer or "", flags=re.S)
+def _loads_object(text):
+    """The first {...} of `text` as a dict, accepting a trailing comma or typographic quotes."""
+    text = re.sub(r"```[a-zA-Z]*", "", text)
+    first, last = text.find("{"), text.rfind("}")
+    if first == -1 or last <= first:
+        raise ValueError("no JSON object in the answer")
+    body = text[first:last + 1]
     try:
-        data = video_brief._json_object(text)
+        return json.loads(body)
     except ValueError:
-        return {}
+        repaired = re.sub(r",\s*([\]}])", r"\1", body).replace("\u201c", '"').replace("\u201d", '"')
+        try:
+            return json.loads(repaired)
+        except ValueError:
+            pass
+    # Last resort: the "key": "value" pairs one by one (an answer with a stray quote or cut off).
+    found = {}
+    for match in re.finditer(r'"(title|topic|hook)"\s*:\s*"((?:[^"\\]|\\.)*)"', body):
+        found[match.group(1)] = match.group(2)
+    if not found:
+        raise ValueError("the JSON object cannot be read")
+    return found
+
+
+def check_texts(answer):
+    """(texts, problem): the cover texts in the model's answer, or ({}, why they cannot be used)."""
+    text = llm.strip_thinking(re.sub(r"<(think|thought)>.*?</\1>", "", answer or "", flags=re.S))
+    if not text:
+        return {}, "the answer is empty"
+    try:
+        data = _loads_object(text)
+    except ValueError as error:
+        return {}, str(error)
     if not isinstance(data, dict):
-        return {}
+        return {}, "the answer is not a JSON object"
     texts = {key: clean_text(data.get(key), limit) for key, limit in TEXT_LIMITS.items()}
     texts["title"] = texts["title"].rstrip(".")
     texts["topic"] = texts["topic"].rstrip(".")
-    return texts if texts["title"] else {}
+    if not texts["title"]:
+        raw = str(data.get("title") or "").strip()
+        if not raw:
+            return {}, "the answer has no title"
+        if CJK.search(raw):
+            return {}, "the title has Chinese characters"
+        return {}, f"the title is longer than {TEXT_LIMITS['title']} words"
+    return texts, ""
+
+
+def parse_texts(answer):
+    """{"title", "topic", "hook"} from the model's answer (a field it got wrong is ""), or {} without a usable title."""
+    return check_texts(answer)[0]
 
 
 def title_writers():
@@ -177,14 +215,20 @@ def write_texts(context, writers=None):
         return {}
     prompt = build_title_prompt(context)
     for writer in writers if writers is not None else title_writers():
-        try:
-            texts = parse_texts(writer(prompt))
-        except (llm.QuotaExhausted, llm.LLMError, RuntimeError, ValueError) as error:
-            print(f"Thumbnail text: the LLM failed ({str(error)[:120]})", flush=True)
-            continue
-        if texts:
-            return texts
-        print("Thumbnail text: the answer was not usable", flush=True)
+        request = prompt
+        for attempt in (1, 2):  # a second try tells the model what was wrong
+            try:
+                answer = writer(request)
+            except (llm.QuotaExhausted, llm.LLMError, RuntimeError, ValueError) as error:
+                print(f"Thumbnail text: the LLM failed ({str(error)[:120]})", flush=True)
+                break
+            texts, problem = check_texts(answer)
+            if texts:
+                return texts
+            shown = " ".join((answer or "").split())[:150]
+            print(f"Thumbnail text: the answer was not usable ({problem}): {shown!r}", flush=True)
+            request = prompt + (f"\n\nYour previous answer could not be used ({problem}). Answer again with ONLY "
+                                "one JSON object in Vietnamese, with a short title and a topic.")
     return {}
 
 
@@ -491,6 +535,18 @@ def run_local_checks():
     assert write_texts(context, [broken, lambda p: asked.append("second") or good])["title"] == "Bạn thuộc kiểu nào?" \
         and asked == ["first", "second"]
     assert write_texts(context, [broken, lambda p: "không phải json"]) == {}   # nothing usable: no text, no failure
+    # A readable-but-flawed answer is fixed or asked again once, and the log says why it was refused.
+    assert parse_texts('{"title": "Bạn thuộc kiểu nào?", "topic": "Tâm lý học",}')["title"] == "Bạn thuộc kiểu nào?"
+    assert parse_texts('Đây: {"title": "Bạn nghĩ gì", "topic": "Tâm \u201cx"  stray "hook": "a"}')["title"] == "Bạn nghĩ gì"
+    assert check_texts("")[1] == "the answer is empty" and check_texts('{"topic": "x"}')[1] == "the answer has no title"
+    assert "longer than 9" in check_texts('{"title": "a b c d e f g h i j"}')[1]
+    assert "Chinese" in check_texts('{"title": "四种金钱"}')[1]
+    tries = []
+    def second_time(prompt):
+        tries.append(prompt)
+        return "không phải json" if len(tries) == 1 else good
+    assert write_texts(context, [second_time])["title"] == "Bạn thuộc kiểu nào?" and len(tries) == 2
+    assert "could not be used (no JSON object in the answer)" in tries[1]
     with tempfile.TemporaryDirectory() as root:
         job = Path(root)
         (job / "video_info.json").write_text(json.dumps({"title": "T", "channel": "K"}), encoding="utf-8")
